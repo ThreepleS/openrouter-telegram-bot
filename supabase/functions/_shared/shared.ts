@@ -178,6 +178,7 @@ async function getUser(supabase: SupabaseClient, userId: number): Promise<any> {
     if (data[col]) data[col] = await decryptApiKey(data[col]);
   }
   if (data.api_key) data.api_key = await decryptApiKey(data.api_key);
+  if (data.system_prompt) data.system_prompt = await decryptField(data.system_prompt);
   return data;
 }
 
@@ -525,20 +526,34 @@ async function checkRateLimit(supabase: SupabaseClient, userId: number): Promise
   return true;
 }
 
+let cachedCryptoKey: CryptoKey | null = null;
+let cachedRawKey = "";
+
 function getCryptoKey(): { key: CryptoKey | null; raw: string } {
   const raw = getEnv("AUDIT_ENCRYPTION_KEY");
   if (!raw || raw.length < 32) return { key: null, raw: "" };
+  if (cachedCryptoKey && cachedRawKey === raw) return { key: cachedCryptoKey, raw };
+  cachedRawKey = raw;
+  const enc = new TextEncoder();
   return { key: null, raw };
 }
 
-async function encryptApiKey(plaintext: string): Promise<string> {
+async function importCryptoKey(raw: string): Promise<CryptoKey | null> {
+  try {
+    return await crypto.subtle.importKey("raw", new TextEncoder().encode(raw), { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+  } catch (_) {
+    return null;
+  }
+}
+
+async function encryptField(plaintext: string): Promise<string> {
   const { raw } = getCryptoKey();
   if (!raw) return plaintext;
   try {
-    const enc = new TextEncoder();
-    const keyMaterial = await crypto.subtle.importKey("raw", enc.encode(raw), { name: "AES-GCM" }, false, ["encrypt"]);
+    const keyMaterial = await importCryptoKey(raw);
+    if (!keyMaterial) return plaintext;
     const iv = crypto.getRandomValues(new Uint8Array(12));
-    const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, keyMaterial, enc.encode(plaintext));
+    const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, keyMaterial, new TextEncoder().encode(plaintext));
     const buf = new Uint8Array(iv.byteLength + encrypted.byteLength);
     buf.set(iv);
     buf.set(new Uint8Array(encrypted), iv.byteLength);
@@ -548,19 +563,45 @@ async function encryptApiKey(plaintext: string): Promise<string> {
   }
 }
 
-async function decryptApiKey(ciphertext: string): Promise<string> {
+async function decryptField(ciphertext: string): Promise<string> {
   const { raw } = getCryptoKey();
   if (!raw) return ciphertext;
   try {
+    const keyMaterial = await importCryptoKey(raw);
+    if (!keyMaterial) return ciphertext;
     const data = Uint8Array.from(atob(ciphertext), (c) => c.charCodeAt(0));
     const iv = data.slice(0, 12);
     const payload = data.slice(12);
-    const keyMaterial = await crypto.subtle.importKey("raw", new TextEncoder().encode(raw), { name: "AES-GCM" }, false, ["decrypt"]);
     const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, keyMaterial, payload);
     return new TextDecoder().decode(decrypted);
   } catch (_) {
     return ciphertext;
   }
+}
+
+async function tryDecryptField(ciphertext: string): Promise<string | null> {
+  const { raw } = getCryptoKey();
+  if (!raw) return null;
+  try {
+    const keyMaterial = await importCryptoKey(raw);
+    if (!keyMaterial) return null;
+    const data = Uint8Array.from(atob(ciphertext), (c) => c.charCodeAt(0));
+    if (data.length < 13) return null;
+    const iv = data.slice(0, 12);
+    const payload = data.slice(12);
+    const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, keyMaterial, payload);
+    return new TextDecoder().decode(decrypted);
+  } catch (_) {
+    return null;
+  }
+}
+
+async function encryptApiKey(plaintext: string): Promise<string> {
+  return encryptField(plaintext);
+}
+
+async function decryptApiKey(ciphertext: string): Promise<string> {
+  return decryptField(ciphertext);
 }
 
 export {
@@ -592,6 +633,9 @@ export {
   withCORS,
   auditLog,
   checkRateLimit,
+  encryptField,
+  decryptField,
+  tryDecryptField,
   encryptApiKey,
   decryptApiKey,
 };

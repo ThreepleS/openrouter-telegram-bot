@@ -1,5 +1,5 @@
 ﻿// Edge Function: auth (аналог api_auth + api_whoami).
-import { verifyInitData, extractUser, getEnv, getSupabase, isWhitelisted, ensureUser, getUser, auditLog, checkRateLimit, corsPreflight, withCORS, resolveEffectiveApiKey } from "../_shared/shared.ts";
+import { verifyInitData, extractUser, getEnv, getSupabase, isWhitelisted, ensureUser, getUser, auditLog, checkRateLimit, decryptField, corsPreflight, withCORS, resolveEffectiveApiKey } from "../_shared/shared.ts";
 
 const BOT_TOKEN = getEnv("BOT_TOKEN");
 const ADMIN_ID = Number(getEnv("ADMIN_ID") || 0);
@@ -61,10 +61,10 @@ Deno.serve(async (req: Request) => {
       .eq("user_id", userId)
       .order("id", { ascending: false })
       .limit(limit);
-    history = (hist || []).reverse().map((m: any) => ({
+    history = await Promise.all((hist || []).reverse().map(async (m: any) => ({
       role: m.role,
-      content: m.content || "",
-      image: m.image_url || null}));
+      content: await decryptField(m.content || ""),
+      image: m.image_url || null})));
   } catch (_) {
     history = [];
   }

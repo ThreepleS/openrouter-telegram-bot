@@ -88,7 +88,7 @@ Deno.serve(async (req: Request) => {
     }
   }
   if (payload.selected_model) updates.selected_model = String(payload.selected_model).trim();
-  if (payload.system_prompt !== undefined && payload.system_prompt !== null) updates.system_prompt = String(payload.system_prompt);
+  if (payload.system_prompt !== undefined && payload.system_prompt !== null) updates.system_prompt = await encryptField(String(payload.system_prompt));
   if (payload.context_limit !== undefined) {
     let cl = Number(payload.context_limit);
     if (isNaN(cl)) return json({ ok: false, error: "Лимит контекста должен быть числом" }, 400);
@@ -147,7 +147,12 @@ Deno.serve(async (req: Request) => {
         .eq("user_id", userId)
         .order("updated_at", { ascending: false });
       if (error) return json({ ok: false, error: error.message }, 500);
-      return json({ ok: true, templates: data || [] });
+      const templates = await Promise.all((data || []).map(async (t: any) => ({
+        ...t,
+        text: await decryptField(t.text || ""),
+        original_text: await decryptField(t.original_text || ""),
+      })));
+      return json({ ok: true, templates });
     }
     if (templatesAction === "save") {
       const list = Array.isArray(payload.templates) ? payload.templates : [];
@@ -158,9 +163,9 @@ Deno.serve(async (req: Request) => {
           id,
           user_id: userId,
           name: String(t.name || "").trim(),
-          text: String(t.text || "").trim(),
+          text: await encryptField(String(t.text || "").trim()),
           recommended: !!t.recommended,
-          original_text: String(t.originalText || t.original_text || "").trim(),
+          original_text: await encryptField(String(t.originalText || t.original_text || "").trim()),
           updated_at: now,
           created_at: Number(t.created_at) || now}, { onConflict: "id" });
       }

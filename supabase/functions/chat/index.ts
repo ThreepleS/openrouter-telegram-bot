@@ -131,7 +131,8 @@ Deno.serve(async (req: Request) => {
     return json({ ok: false, error: "Выбери модель в настройках" }, 401);
   }
 
-  await supabase.from("messages").insert({ user_id: userId, role: "user", content: messageText, image_url: imageRaw });
+  const encryptedMessage = await encryptField(messageText);
+  await supabase.from("messages").insert({ user_id: userId, role: "user", content: encryptedMessage, image_url: imageRaw });
 
   const currentMsg: any = { role: "user", content: messageText };
   if (imageRaw && typeof imageRaw === "string" && imageRaw.startsWith("data:")) {
@@ -155,7 +156,11 @@ Deno.serve(async (req: Request) => {
       .order("id", { ascending: false });
     if (limit) query.limit(limit);
     const { data: hist } = await query;
-    history = historyToMessages((hist || []).reverse());
+    const decrypted = await Promise.all((hist || []).reverse().map(async (m: any) => ({
+      ...m,
+      content: await decryptField(m.content || ""),
+    })));
+    history = historyToMessages(decrypted);
   }
 
   history.unshift(currentMsg);
@@ -262,7 +267,8 @@ Deno.serve(async (req: Request) => {
       }
 
       try {
-        await supabase.from("messages").insert({ user_id: userId, role: "assistant", content: full || "" });
+        const encryptedReply = await encryptField(full || "");
+        await supabase.from("messages").insert({ user_id: userId, role: "assistant", content: encryptedReply });
         const total = usage.total_tokens || ((usage.prompt_tokens || 0) + (usage.completion_tokens || 0));
         if (total) await supabase.from("api_stats").insert({ user_id: userId, tokens_used: total, timestamp: Math.floor(Date.now() / 1000) });
       } catch (e: any) {

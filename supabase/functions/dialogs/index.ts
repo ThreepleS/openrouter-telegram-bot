@@ -1,5 +1,5 @@
 // Edge Function: dialogs (CRUD for dialogs stored in Supabase Postgres).
-import { verifyInitData, extractUser, getEnv, getSupabase, isWhitelisted, ensureUser, auditLog, checkRateLimit, corsPreflight, withCORS } from "../_shared/shared.ts";
+import { verifyInitData, extractUser, getEnv, getSupabase, isWhitelisted, ensureUser, auditLog, checkRateLimit, encryptField, decryptField, corsPreflight, withCORS } from "../_shared/shared.ts";
 
 const BOT_TOKEN = getEnv("BOT_TOKEN");
 const ADMIN_ID = Number(getEnv("ADMIN_ID") || 0);
@@ -54,19 +54,32 @@ Deno.serve(async (req: Request) => {
         .eq("user_id", userId)
         .order("updated_at", { ascending: false });
       if (error) return json({ ok: false, error: error.message }, 500);
+      const dialogs = await Promise.all((data || []).map(async (d: any) => ({
+        ...d,
+        name: await decryptField(d.name || ""),
+        messages: await Promise.all((Array.isArray(d.messages) ? d.messages : []).map(async (m: any) => ({
+          ...m,
+          content: await decryptField(m.content || ""),
+        }))),
+      })));
       await auditLog(supabase, userId, "dialogs_list", true);
-      return json({ ok: true, dialogs: data || [] });
+      return json({ ok: true, dialogs });
     }
 
     if (action === "create") {
       const id = crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random();
       const now = Date.now();
       const name = payload.name || `Диалог от ${new Date().toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" })}`;
+      const encryptedName = await encryptField(name);
+      const encryptedMessages = await Promise.all((payload.messages || []).map(async (m: any) => ({
+        ...m,
+        content: await encryptField(m.content || ""),
+      })));
       const row = {
         id,
         user_id: userId,
-        name,
-        messages: payload.messages || [],
+        name: encryptedName,
+        messages: encryptedMessages,
         model: payload.model || "",
         created_at: now,
         updated_at: now};
@@ -80,8 +93,13 @@ Deno.serve(async (req: Request) => {
       const id = String(payload.id || "").trim();
       if (!id) return json({ ok: false, error: "id обязателен" }, 400);
       const updates: any = { updated_at: Date.now() };
-      if (payload.name !== undefined) updates.name = String(payload.name).trim() || updates.name;
-      if (payload.messages !== undefined) updates.messages = payload.messages;
+      if (payload.name !== undefined) updates.name = await encryptField(String(payload.name).trim() || updates.name);
+      if (payload.messages !== undefined) {
+        updates.messages = await Promise.all((Array.isArray(payload.messages) ? payload.messages : []).map(async (m: any) => ({
+          ...m,
+          content: await encryptField(m.content || ""),
+        })));
+      }
       if (payload.model !== undefined) updates.model = String(payload.model).trim();
       const { data, error } = await supabase.from("dialogs").update(updates).eq("id", id).eq("user_id", userId).select("*").single();
       if (error) return json({ ok: false, error: error.message }, 500);
