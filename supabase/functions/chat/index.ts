@@ -1,0 +1,295 @@
+﻿// Edge Function: чат (аналог api_chat + stream_ai_api).
+// Настоящий server-side streaming: ReadableStream отдаёт ndjson-события
+// (start/delta/result) по мере поступления токенов от провайдера.
+
+import { verifyInitData, extractUser, getEnv, getSupabase, API_ENDPOINTS, isWhitelisted, ensureUser, getUser, buildUserProviderKeys, detectProvider, normalizeModelId, getProviderApiKey, resolveEffectiveApiKey, buildOpenAIMessages, buildGeminiContents, extractOpenAIContent, extractGeminiContent, extractUsage, auditLog, checkRateLimit, corsPreflight, withCORS } from "../_shared/shared.ts";
+
+const BOT_TOKEN = getEnv("BOT_TOKEN");
+
+function json(payload: any, status = 200) {
+  return withCORS(new Response(JSON.stringify(payload), {
+    status,
+    headers: { "Content-Type": "application/json; charset=utf-8" }}));
+}
+
+function historyToMessages(history: any[]): any[] {
+  const messages: any[] = [];
+  for (const m of history || []) {
+    const item: any = { role: m.role || "user", content: m.content || "" };
+    const img = m.image_url || m.image;
+    if (img && typeof img === "string" && img.startsWith("data:")) {
+      const comma = img.indexOf(",");
+      if (comma >= 0) {
+        item.image_bytes = img.slice(comma + 1);
+        const mimeMatch = img.match(/^data:([^;]+);/);
+        if (mimeMatch) item.image_mime = mimeMatch[1];
+      }
+    }
+    messages.push(item);
+  }
+  return messages;
+}
+
+function getProviderHeaders(provider: string, key: string): Record<string, string> {
+  if (provider === "gemini") {
+    return { "Content-Type": "application/json", "x-goog-api-key": key };
+  }
+  const h: Record<string, string> = { "Authorization": `Bearer ${key}`, "Content-Type": "application/json" };
+  if (provider === "openrouter") {
+    h["HTTP-Referer"] = "https://t.me/openrouter_bot";
+    h["X-Title"] = "OpenRouter Telegram Bot";
+  }
+  return h;
+}
+
+function getProviderUrl(provider: string, normalizedModel: string): string {
+  if (provider === "gemini") {
+    return API_ENDPOINTS.gemini_chat.replace("{model}", normalizedModel).replace(":generateContent", ":streamGenerateContent") + "?alt=sse";
+  }
+  if (provider === "openai") return API_ENDPOINTS.openai_chat;
+  if (provider === "groq") return API_ENDPOINTS.groq_chat;
+  if (provider === "huggingface") return "https://router.huggingface.co/v1/chat/completions";
+  if (provider === "venice") return API_ENDPOINTS.venice_chat;
+  return API_ENDPOINTS.openrouter_chat;
+}
+
+function buildPayload(provider: string, normalizedModel: string, systemPrompt: string, messages: any[]): any {
+  if (provider === "gemini") {
+    return {
+      contents: buildGeminiContents(messages, provider, normalizedModel),
+      system_instruction: { parts: [{ text: systemPrompt }] }};
+  }
+  return {
+    model: normalizedModel,
+    messages: buildOpenAIMessages(systemPrompt, messages, provider, normalizedModel),
+    stream: provider !== "gemini"};
+}
+
+const STREAM_HEADERS = {
+  "Content-Type": "application/x-ndjson; charset=utf-8",
+  "Cache-Control": "no-cache, no-transform",
+  "X-Accel-Buffering": "no"};
+
+Deno.serve(async (req: Request) => {
+ try {
+  const pre = corsPreflight(req);
+  if (pre) return pre;
+  if (req.method !== "POST") return withCORS(new Response(JSON.stringify({ ok: false, error: "Метод не поддерживается" }), { status: 405, headers: { "Content-Type": "application/json; charset=utf-8" } }));
+
+  let payload: any;
+  try { payload = await req.json(); } catch { return json({ ok: false, error: "Неверный JSON" }, 400); }
+
+  const initData = payload.init_data || "";
+  const user = extractUser(initData);
+  let userId: number | null = null;
+  if (BOT_TOKEN && initData && user) {
+    const ok = await verifyInitData(initData, BOT_TOKEN);
+    await auditLog(getSupabase(true), user.id, "chat_verify", ok);
+    if (!ok) return json({ ok: false, error: "Невалидные данные Telegram" }, 401);
+    userId = user.id;
+  } else if (getEnv("WEB_APP_DEV") && payload.user_id) {
+    userId = Number(payload.user_id);
+  }
+  if (userId == null) return json({ ok: false, error: "Не удалось определить пользователя" }, 401);
+
+  const messageText = (payload.message || "").trim();
+  const imageRaw = payload.image || null;
+  if (payload.clear) {
+    const supabaClear = getSupabase(true);
+    await supabaClear.from("messages").delete().eq("user_id", userId);
+    await auditLog(supabaClear, userId, "chat_clear", true);
+    return json({ ok: true, cleared: true });
+  }
+  if (!messageText && !imageRaw) return json({ ok: false, error: "Пустое сообщение" }, 400);
+
+  const supabase = getSupabase(true);
+  if (!(await checkRateLimit(supabase, userId))) {
+    await auditLog(supabase, userId, "chat_rate_limited", false);
+    return json({ ok: false, error: "Слишком много запросов. Подождите минуту." }, 429);
+  }
+
+  if (!(await isWhitelisted(supabase, userId))) {
+    await auditLog(supabase, userId, "chat_whitelist_fail", false);
+    return json({ ok: false, error: "Нет доступа. Запросите доступ у администратора." }, 401);
+  }
+  const userRow = await getUser(supabase, userId);
+  if (userRow == null) {
+    await auditLog(supabase, userId, "chat_no_key", false);
+    return json({ ok: false, error: "Укажи API-ключ в настройках" }, 401);
+  }
+
+  const dbKeys = buildUserProviderKeys(userRow);
+  const providersToCheck = ["openrouter", "openai", "gemini", "groq", "huggingface", "venice"];
+  const resolvedKeys = await Promise.all(providersToCheck.map((p) => resolveEffectiveApiKey(supabase, userRow, p)));
+  const hasKey = resolvedKeys.some((k) => k && String(k).trim()) || Object.values(dbKeys).some((k: any) => k && String(k).trim());
+  if (!hasKey) {
+    await auditLog(supabase, userId, "chat_no_key", false);
+    return json({ ok: false, error: "Укажи API-ключ в настройках" }, 401);
+  }
+  if (!userRow.selected_model) {
+    await auditLog(supabase, userId, "chat_no_model", false);
+    return json({ ok: false, error: "Выбери модель в настройках" }, 401);
+  }
+
+  await supabase.from("messages").insert({ user_id: userId, role: "user", content: messageText, image_url: imageRaw });
+
+  const currentMsg: any = { role: "user", content: messageText };
+  if (imageRaw && typeof imageRaw === "string" && imageRaw.startsWith("data:")) {
+    const comma = imageRaw.indexOf(",");
+    if (comma >= 0) {
+      currentMsg.image_bytes = imageRaw.slice(comma + 1);
+      const mimeMatch = imageRaw.match(/^data:([^;]+);/);
+      if (mimeMatch) currentMsg.image_mime = mimeMatch[1];
+    }
+  }
+
+  let history: any[] = [];
+  if (Array.isArray(payload.history) && payload.history.length > 0) {
+    history = historyToMessages(payload.history);
+  } else {
+    const limit = payload.context_limit_full ? null : (userRow.context_limit || 10);
+    const query = supabase
+      .from("messages")
+      .select("role, content, image_url")
+      .eq("user_id", userId)
+      .order("id", { ascending: false });
+    if (limit) query.limit(limit);
+    const { data: hist } = await query;
+    history = historyToMessages((hist || []).reverse());
+  }
+
+  history.unshift(currentMsg);
+
+  const model = userRow.selected_model;
+  const provider = detectProvider(model);
+  const normalizedModel = normalizeModelId(provider, model);
+  const providerKey = await resolveEffectiveApiKey(supabase, userRow, provider);
+  if (!providerKey) return json({ ok: false, error: `Не указан API-ключ для ${provider}` }, 400);
+
+  const url = getProviderUrl(provider, normalizedModel);
+  const headers = getProviderHeaders(provider, providerKey);
+  const serverHistory = history.length > 0 ? history : [];
+  const body = buildPayload(provider, normalizedModel, (payload.system_prompt || userRow.system_prompt || "").trim(), serverHistory);
+  const statsMode = (userRow.stats_display || "full").toLowerCase();
+
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (obj: any) => controller.enqueue(encoder.encode(JSON.stringify(obj) + "\n"));
+      const finish = () => { try { controller.close(); } catch (_) {} };
+
+      send({ type: "start" });
+      let full = "";
+      let usage: any = {};
+
+      try {
+        const resp = await fetch(url, { method: "POST", headers, body: JSON.stringify(body) });
+        if (!resp.ok) {
+          const text = await resp.text();
+          send({ type: "error", message: `Ошибка API ${provider.toUpperCase()} (${resp.status}): ${text.slice(0, 500)}` });
+          return finish();
+        }
+
+        if (provider === "gemini") {
+          const reader = resp.body!.getReader();
+          const decoder = new TextDecoder();
+          let buf = "";
+          let prevText = "";
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            let nl: number;
+            while ((nl = buf.indexOf("\n")) >= 0) {
+              const line = buf.slice(0, nl).trim();
+              buf = buf.slice(nl + 1);
+              if (!line || !line.startsWith("data:")) continue;
+              const data = line.slice(5).trim();
+              if (!data || data === "[DONE]") continue;
+               try {
+                 const obj = JSON.parse(data);
+                 const textNow = extractGeminiContent(obj);
+                 if (obj.usageMetadata) usage = extractUsage(obj, "gemini");
+                 let delta = "";
+                 if (textNow.startsWith(prevText)) {
+                   delta = textNow.slice(prevText.length);
+                   prevText = textNow;
+                 } else if (textNow && !prevText) {
+                   delta = textNow;
+                   prevText = textNow;
+                 } else {
+                   delta = textNow;
+                   prevText = prevText + delta;
+                 }
+                 if (delta) {
+                   full += delta;
+                   send({ type: "delta", text: delta });
+                 }
+               } catch { /* частичный/служебный чанк */ }
+            }
+          }
+        } else {
+          const reader = resp.body!.getReader();
+          const decoder = new TextDecoder();
+          let buf = "";
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            let nl: number;
+            while ((nl = buf.indexOf("\n")) >= 0) {
+              const line = buf.slice(0, nl).trim();
+              buf = buf.slice(nl + 1);
+              if (!line || !line.startsWith("data:")) continue;
+              const data = line.slice(5).trim();
+              if (data === "[DONE]") break;
+               try {
+                 const obj = JSON.parse(data);
+                 const choices = obj.choices || [];
+                 let delta = choices.length ? (choices[0].delta?.content || "") : "";
+                 if (obj.usage) usage = obj.usage;
+                  if (delta) {
+                    full += delta;
+                    send({ type: "delta", text: delta });
+                  }
+               } catch { /* ignore partial */ }
+            }
+          }
+        }
+      } catch (e: any) {
+        send({ type: "error", message: `Не удалось подключиться к API: ${e?.message || e}` });
+        return finish();
+      }
+
+      try {
+        await supabase.from("messages").insert({ user_id: userId, role: "assistant", content: full || "" });
+        const total = usage.total_tokens || ((usage.prompt_tokens || 0) + (usage.completion_tokens || 0));
+        if (total) await supabase.from("api_stats").insert({ user_id: userId, tokens_used: total, timestamp: Math.floor(Date.now() / 1000) });
+      } catch (e: any) {
+        send({ type: "error", message: `Ошибка сохранения: ${e?.message || e}` });
+      }
+
+      const pt = usage.prompt_tokens ?? usage.promptTokenCount;
+      const ct = usage.completion_tokens ?? usage.candidatesTokenCount;
+      const tt = usage.total_tokens ?? usage.totalTokenCount;
+      let statsStr = "";
+      if (statsMode !== "disabled" && (pt != null || ct != null || tt != null)) {
+        if (statsMode === "compact") {
+          statsStr = `токенов: ${tt != null ? tt : ((pt || 0) + (ct || 0))}`;
+        } else {
+          const parts: string[] = [`модель: ${model}`];
+          if (pt != null) parts.push(`prompt: ${pt}`);
+          if (ct != null) parts.push(`completion: ${ct}`);
+          if (tt != null) parts.push(`total: ${tt}`);
+          statsStr = parts.join(" | ");
+        }
+      }
+      send({ type: "result", ok: true, reply: full, markdown: full, model, usage, stats: statsStr });
+      finish();
+    }});
+
+  const chatSupabase = getSupabase(true);return withCORS(new Response(stream, { headers: STREAM_HEADERS }));
+ } catch (e: any) {
+   const errSupabase = getSupabase(true);return json({ ok: false, crash: String(e?.message || e), stack: String(e?.stack || "").substring(0, 800) }, 500);
+ }
+});

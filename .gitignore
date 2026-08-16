@@ -1,0 +1,12 @@
+.env
+api.env
+ping.py
+venv/
+__pycache__/
+*.pyc
+*.db
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+startup_log.txt
+.DS_Store
