@@ -69,6 +69,20 @@ Deno.serve(async (req: Request) => {
     history = [];
   }
 
+  let recommendedModels: string[] = [];
+  try {
+    const { data: siteRec } = await supabase
+      .from("site_settings")
+      .select("value")
+      .eq("key", "recommended_models")
+      .maybeSingle();
+    if (siteRec && siteRec.value) {
+      try { recommendedModels = JSON.parse(siteRec.value); } catch { recommendedModels = []; }
+    }
+  } catch (_) {
+    recommendedModels = [];
+  }
+
   return json({
     ok: true,
     user_id: userId,
@@ -86,5 +100,6 @@ Deno.serve(async (req: Request) => {
       notify_sound: userRow.notify_sound,
       notify_vibrate: userRow.notify_vibrate,
       notify_sound_id: userRow.notify_sound_id,
-      vib_strength: userRow.vib_strength}});
+      vib_strength: userRow.vib_strength,
+      recommended_models: recommendedModels}});
 });
