@@ -1,4 +1,4 @@
-﻿// Edge Function: чат (аналог api_chat + stream_ai_api).
+// Edge Function: чат (аналог api_chat + stream_ai_api).
 // Настоящий server-side streaming: ReadableStream отдаёт ndjson-события
 // (start/delta/result) по мере поступления токенов от провайдера.
 
@@ -98,6 +98,9 @@ Deno.serve(async (req: Request) => {
 const initData = payload.init_data || "";
   const user = extractUser(initData);
   let userId: number | null = null;
+  const initData = payload.init_data || "";
+  const user = extractUser(initData);
+  let userId: number | null = null;
   if (BOT_TOKEN && initData && user) {
     const ok = await verifyInitData(initData, BOT_TOKEN);
     await auditLog(getSupabase(true), user.id, "chat_verify", ok);
@@ -112,68 +115,139 @@ const initData = payload.init_data || "";
     const supabase = getSupabase(true);
     const userRow = await getUser(supabase, userId);
     if (!userRow) return json({ ok: false, error: "Пользователь не найден" }, 404);
-    
-    // Get full history
-    const { data: hist } = await supabase
-      .from("messages")
-      .select("role, content, image_url")
-      .eq("user_id", userId)
-      .order("id", { ascending: true });
-    
-    const decrypted = await Promise.all((hist || []).map(async (m: any) => ({
-      ...m,
-      content: await decryptField(m.content || ""),
-    })));
-    
-    const history = historyToMessages(decrypted);
-    if (history.length < 5) {
-      return json({ ok: true, summary: "История слишком коротка для сжатия" });
+
+    const dialogId = payload.dialog_id ? String(payload.dialog_id).trim() : null;
+    let dialogRow: any = null;
+
+    if (dialogId) {
+      const { data: d } = await supabase
+        .from("dialogs")
+        .select("*")
+        .eq("id", dialogId)
+        .eq("user_id", userId)
+        .maybeSingle();
+      dialogRow = d;
     }
-    
+
+    if (!dialogRow) {
+      const { data: latest } = await supabase
+        .from("dialogs")
+        .select("*")
+        .eq("user_id", userId)
+        .order("updated_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      dialogRow = latest;
+    }
+
+    let history: any[] = [];
+    if (dialogRow && Array.isArray(dialogRow.messages) && dialogRow.messages.length > 0) {
+      history = await Promise.all(dialogRow.messages.map(async (m: any) => {
+        const decryptedContent = await decryptField(m.content || "");
+        return {
+          ...m,
+          content: decryptedContent !== null ? decryptedContent : (m.content || "")
+        };
+      }));
+    } else {
+      const { data: hist } = await supabase
+        .from("messages")
+        .select("role, content, image_url")
+        .eq("user_id", userId)
+        .order("id", { ascending: true });
+
+      const decrypted = await Promise.all((hist || []).map(async (m: any) => ({
+        ...m,
+        content: await decryptField(m.content || ""),
+      })));
+      history = historyToMessages(decrypted);
+    }
+
+    if (history.length < 5) {
+      return json({ ok: true, summary: "История слишком коротка для сжатия (менее 5 сообщений)" });
+    }
+
     // Split: keep last 4 messages, summarize the rest
     const toSummarize = history.slice(0, -4);
     const recent = history.slice(-4);
-    
-    const summaryPrompt = "Сделай краткое резюме диалога: ключевые факты, договорённости, технические детали, имена. Максимум 300 слов.";
+
+    const summaryPrompt = "Сделай краткое структурированное резюме диалога: ключевые факты, контекст, договорённости, имена, технические детали. Максимум 300 слов на русском языке.";
     const summaryHistory = [
-      ...toSummarize,
+      ...toSummarize.map((m: any) => ({ role: m.role || "user", content: m.content || "" })),
       { role: "user", content: summaryPrompt }
     ];
-    
-    const model = userRow.selected_model;
+
+    const model = userRow.selected_model || "google/gemini-2.5-flash";
     const prov = detectProvider(model);
     const normModel = normalizeModelId(prov, model);
-    const useCheap = (await getSupabase(true)).from("users").select("settings").eq("id", userId).single().then(r => r.data?.settings?.compress_use_cheap);
-    // For now use active model, can be extended with cheap model setting
     const providerKey = await resolveEffectiveApiKey(supabase, userRow, prov);
-    
-    const summaryBody = buildPayload(prov, normModel, summaryPrompt, summaryHistory);
-    const summaryUrl = getProviderUrl(prov, normModel);
+    if (!providerKey || !String(providerKey).trim()) {
+      return json({ ok: false, error: `Не указан API-ключ для генерации резюме (${prov})` }, 400);
+    }
+
+    let summaryUrl: string;
+    let summaryBody: any;
+    if (prov === "gemini") {
+      summaryUrl = `${API_ENDPOINTS.gemini_chat.replace("{model}", normModel)}?key=${providerKey}`;
+      summaryBody = {
+        contents: buildGeminiContents(summaryHistory, prov, normModel),
+        system_instruction: { parts: [{ text: summaryPrompt }] }
+      };
+    } else {
+      summaryUrl = getProviderUrl(prov, normModel);
+      summaryBody = {
+        model: normModel,
+        messages: buildOpenAIMessages(summaryPrompt, summaryHistory, prov, normModel),
+        stream: false,
+        tools: [],
+        tool_choice: "none"
+      };
+    }
     const summaryHeaders = toHeaders(prov, providerKey);
-    
-    const summaryResp = await fetch(summaryUrl, { method: "POST", headers: summaryHeaders, body: JSON.stringify(summaryBody) });
+
+    const summaryResp = await fetch(summaryUrl, {
+      method: "POST",
+      headers: summaryHeaders,
+      body: JSON.stringify(summaryBody)
+    });
+
     if (!summaryResp.ok) {
       const err = await summaryResp.text();
-      return json({ ok: false, error: "Ошибка генерации резюме: " + err }, 500);
+      return json({ ok: false, error: "Ошибка генерации резюме: " + err.slice(0, 300) }, 500);
     }
+
     const summaryData = await summaryResp.json();
-    const summaryText = extractGeminiContent(summaryData) || extractOpenAIContent(summaryData) || "Ошибка извлечения";
-    
-    // Save compressed history: system prompt + summary + recent messages
+    const summaryText = extractGeminiContent(summaryData) || extractOpenAIContent(summaryData) || "";
+    if (!summaryText.trim()) {
+      return json({ ok: false, error: "Не удалось сформировать текст резюме" }, 500);
+    }
+
     const newHistory = [
-      { role: "user", content: userRow.system_prompt || "" },
-      { role: "assistant", content: "Резюме предыдущего диалога:\n" + summaryText },
+      { role: "assistant", content: "📌 Резюме предыдущего контекста:\n" + summaryText.trim() },
       ...recent
     ];
-    
-    // Clear and save new compressed history
+
+    if (dialogRow) {
+      const encryptedDialogMessages = await Promise.all(newHistory.map(async (m: any) => ({
+        ...m,
+        content: await encryptField(m.content || ""),
+        stats: m.stats ? await encryptField(typeof m.stats === "object" ? JSON.stringify(m.stats) : String(m.stats)) : null
+      })));
+
+      await supabase.from("dialogs").update({
+        messages: encryptedDialogMessages,
+        updated_at: Date.now()
+      }).eq("id", dialogRow.id).eq("user_id", userId);
+    }
+
+    // Also update legacy messages table for compatibility
     await supabase.from("messages").delete().eq("user_id", userId);
     for (const msg of newHistory) {
       const enc = await encryptField(msg.content || "");
       await supabase.from("messages").insert({ user_id: userId, role: msg.role, content: enc });
     }
-    
-    return json({ ok: true, summary: "Контекст сжат, старые сообщения заменены резюме" });
+
+    return json({ ok: true, summary: "Контекст успешно сжат, старые сообщения заменены резюме" });
   }
 
   const messageText = (payload.message || "").trim();
@@ -196,6 +270,7 @@ const initData = payload.init_data || "";
     await auditLog(supabase, userId, "chat_blacklist_fail", false);
     return json({ ok: false, error: "Нет доступа. Запросите доступ у администратора." }, 401);
   }
+  
   const userRow = await getUser(supabase, userId);
   if (userRow == null) {
     await auditLog(supabase, userId, "chat_no_key", false);
@@ -249,15 +324,11 @@ const initData = payload.init_data || "";
 
   history.push(currentMsg);
 
-const model = userRow.selected_model;
+  const model = userRow.selected_model;
   const provider = detectProvider(model);
   const normalizedModel = normalizeModelId(provider, model);
   const providerKey = await resolveEffectiveApiKey(supabase, userRow, provider);
-  if (!providerKey || !String(providerKey).trim()) {
-    await auditLog(supabase, userId, "chat_no_key", false);
-    return json({ ok: false, error: `Не указан API-ключ для ${PROVIDER_LABELS[provider] || provider}` }, 400);
-  }
-
+  
   const url = getProviderUrl(provider, normalizedModel);
   const headers = toHeaders(provider, providerKey);
   const serverHistory = history.length > 0 ? history : [];
@@ -279,8 +350,8 @@ const model = userRow.selected_model;
     if (cacheName) {
       // Use cached content: only send recent history
       body = buildPayload(provider, normalizedModel, systemPrompt, cachedHistory);
-      // Override URL to use cached content
-      const cacheUrl = `${API_ENDPOINTS.gemini_chat.replace("{model}", normalizedModel)}?key=${providerKey}&cachedContent=${encodeURIComponent(cacheName)}`;
+      // Remove system_instruction to avoid conflict with cached content
+      delete body.system_instruction;
       body.cachedContent = cacheName;
     }
   }
@@ -299,13 +370,10 @@ const model = userRow.selected_model;
       let full = "";
       let usage: any = {};
 
-try {
+      try {
         const bodyStr = JSON.stringify(body);
         console.log("[chat] fetch body=" + bodyStr.slice(0, 200));
-        const fetchUrl = cacheName 
-          ? `${API_ENDPOINTS.gemini_chat.replace("{model}", normalizedModel)}?key=${providerKey}&cachedContent=${encodeURIComponent(cacheName)}`
-          : url;
-        const resp = await fetch(fetchUrl, { method: "POST", headers, body: bodyStr });
+        const resp = await fetch(url, { method: "POST", headers, body: bodyStr });
         if (!resp.ok) {
           const text = await resp.text();
           send({ type: "error", message: `Ошибка API ${provider.toUpperCase()} (${resp.status}): ${text.slice(0, 500)}` });
