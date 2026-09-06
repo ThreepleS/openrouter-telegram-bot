@@ -24,6 +24,9 @@
      powershell -ExecutionPolicy Bypass -File deploy.ps1
      ```
    - This bumps the timestamp version (`app_<YYYYMMDD_HHMM>.js`), updates `version.json` and `index.html` cache-busting queries (`?v=...`), commits, and pushes to `origin/gh-pages`.
+   - **CRITICAL RULE (Post-Deploy Version Reporting)**: After EVERY frontend deploy, the agent MUST explicitly state the new version string (e.g. `vYYYYMMDD_HHMM`) to the user in the chat, so the user can immediately compare and verify it in the app's settings ("Настройки -> Ещё").
+5. **Fixed Syntax Traps**:
+   - `aiHubQueryAll(...).forEach(...) is not a function`: Caused when `aiHubQueryAll(...).forEach((tab) => { tab.addEventListener(...); });` had an unclosed callback (`forEach` wasn't closed with a second `});`), trapping subsequent code until a dangling `})();` at the end of the file invoked the `undefined` return value of `forEach(...)`.
 
 ## 3. Backend Conventions & Critical Rules (`supabase/functions/`)
 1. **Edge Functions**:
