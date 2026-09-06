@@ -1,5 +1,5 @@
 ﻿// Edge Function: админ-панель (аналог api_admin_*). Единый endpoint с полем action.
-import { verifyInitData, extractUser, getEnv, getSupabase, isWhitelisted, ensureUser, getUser, auditLog, checkRateLimit, corsPreflight, withCORS } from "../_shared/shared.ts";
+import { verifyInitData, extractUser, getEnv, getSupabase, isBlacklisted, ensureUser, getUser, auditLog, checkRateLimit, corsPreflight, withCORS } from "../_shared/shared.ts";
 
 const BOT_TOKEN = getEnv("BOT_TOKEN");
 const ADMIN_ID = Number(getEnv("ADMIN_ID") || 0);
@@ -86,13 +86,14 @@ Deno.serve(async (req: Request) => {
 
   if (action === "summary") {
     const { count: usersTotal } = await supabase.from("users").select("*", { count: "exact", head: true });
-    const { data: wl } = await supabase.from("whitelist").select("user_id");
+    const { data: bl } = await supabase.from("blacklist").select("user_id");
     const { count: msgTotal } = await supabase.from("messages").select("*", { count: "exact", head: true });
     const { data: stats } = await supabase.from("api_stats").select("tokens_used");
     const tokensTotal = (stats || []).reduce((s: number, r: any) => s + (r.tokens_used || 0), 0);
     const s24 = await supabase.from("api_stats").select("user_id").gte("timestamp", now - 86400);
     const s7 = await supabase.from("api_stats").select("user_id").gte("timestamp", now - 7 * 86400);
-    return json({ ok: true, users_total: usersTotal || 0, whitelisted: (wl || []).length, messages_total: msgTotal || 0, tokens_total: tokensTotal, stats_24h: (s24.data || []).length, stats_7d: (s7.data || []).length, admin_id: ADMIN_ID });
+    const { data: blSetting } = await supabase.from("site_settings").select("value").eq("key", "blacklist_enabled").maybeSingle();
+    return json({ ok: true, users_total: usersTotal || 0, blacklisted: (bl || []).length, messages_total: msgTotal || 0, tokens_total: tokensTotal, stats_24h: (s24.data || []).length, stats_7d: (s7.data || []).length, admin_id: ADMIN_ID, blacklist_enabled: blSetting?.value !== "false" });
   }
 
   if (action === "users") {
@@ -114,52 +115,52 @@ Deno.serve(async (req: Request) => {
     return json({ ok: true, users: result });
   }
 
-  if (action === "whitelist") {
+  if (action === "blacklist") {
     const sub = (payload.sub_action || payload.act || "").trim().toLowerCase();
     if (sub === "toggle") {
       const enabled = payload.enabled ? "true" : "false";
-      await supabase.from("site_settings").upsert({ key: "whitelist_enabled", value: enabled, updated_at: now }, { onConflict: "key" });
-      return json({ ok: true, whitelist_enabled: enabled === "true" });
+      await supabase.from("site_settings").upsert({ key: "blacklist_enabled", value: enabled, updated_at: now }, { onConflict: "key" });
+      return json({ ok: true, blacklist_enabled: enabled === "true" });
     }
     if (sub === "setting") {
-      const { data: cur } = await supabase.from("site_settings").select("value").eq("key", "whitelist_enabled").maybeSingle();
-      return json({ ok: true, whitelist_enabled: (cur?.value !== "false") });
+      const { data: cur } = await supabase.from("site_settings").select("value").eq("key", "blacklist_enabled").maybeSingle();
+      return json({ ok: true, blacklist_enabled: (cur?.value !== "false") });
     }
     const sub2 = (payload.sub_action || payload.act || "").trim().toLowerCase();
     if (sub2 === "add") {
       const target = Number(payload.user_id);
       if (isNaN(target)) return json({ ok: false, error: "user_id должен быть числом" }, 400);
-      let accessType = (payload.access_type || "permanent").toLowerCase();
-      if (!["permanent", "temporary"].includes(accessType)) accessType = "permanent";
+      let blockType = (payload.block_type || "permanent").toLowerCase();
+      if (!["permanent", "temporary"].includes(blockType)) blockType = "permanent";
       let expires: number | null = null;
-      if (accessType === "temporary" && payload.days) {
+      if (blockType === "temporary" && payload.days) {
         const d = Number(payload.days);
         if (!isNaN(d)) expires = now + d * 86400;
       }
-      await supabase.from("whitelist").upsert({ user_id: target, access_type: accessType, access_expires_at: expires, added_at: now }, { onConflict: "user_id" });
+      await supabase.from("blacklist").upsert({ user_id: target, block_type: blockType, block_expires_at: expires, blocked_at: now }, { onConflict: "user_id" });
       await ensureUser(target);
-      if (payload.note) await supabase.from("whitelist").update({ note: String(payload.note) }).eq("user_id", target);
+      if (payload.block_reason) await supabase.from("blacklist").update({ block_reason: String(payload.block_reason) }).eq("user_id", target);
     } else if (sub2 === "remove") {
       const target = Number(payload.user_id);
       if (isNaN(target)) return json({ ok: false, error: "user_id должен быть числом" }, 400);
       if (target === ADMIN_ID) return json({ ok: false, error: "Нельзя удалить себя" }, 400);
-      await supabase.from("whitelist").delete().eq("user_id", target);
-    } else if (sub2 === "note") {
+      await supabase.from("blacklist").delete().eq("user_id", target);
+    } else if (sub2 === "block_reason") {
       const target = Number(payload.user_id);
       if (isNaN(target)) return json({ ok: false, error: "user_id должен быть числом" }, 400);
-      await supabase.from("whitelist").update({ note: String(payload.note || "") }).eq("user_id", target);
+      await supabase.from("blacklist").update({ block_reason: String(payload.block_reason || "") }).eq("user_id", target);
     } else if (sub2 === "add_days") {
       const target = Number(payload.user_id);
       if (isNaN(target)) return json({ ok: false, error: "user_id должен быть числом" }, 400);
       const days = Number(payload.days);
       if (isNaN(days) || days <= 0) return json({ ok: false, error: "days должен быть положительным числом" }, 400);
-      const { data: cur } = await supabase.from("whitelist").select("access_expires_at").eq("user_id", target).single();
-      let base = cur && cur.access_expires_at ? Number(cur.access_expires_at) : now;
+      const { data: cur } = await supabase.from("blacklist").select("block_expires_at").eq("user_id", target).single();
+      let base = cur && cur.block_expires_at ? Number(cur.block_expires_at) : now;
       const newExpires = base + days * 86400;
-      await supabase.from("whitelist").update({ access_expires_at: newExpires }).eq("user_id", target);
+      await supabase.from("blacklist").update({ block_expires_at: newExpires }).eq("user_id", target);
     }
-    const { data: wl } = await supabase.from("whitelist").select("user_id, note, access_type, access_expires_at, added_at").order("added_at", { ascending: true });
-    return json({ ok: true, whitelist: wl || [] });
+    const { data: bl } = await supabase.from("blacklist").select("user_id, block_reason, block_type, block_expires_at, blocked_at").order("blocked_at", { ascending: true });
+    return json({ ok: true, blacklist: bl || [] });
   }
 
   if (action === "user") {
@@ -192,3 +193,7 @@ Deno.serve(async (req: Request) => {
 
   return json({ ok: false, error: "Неизвестное действие" }, 400);
 });
+
+
+
+

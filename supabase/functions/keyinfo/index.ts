@@ -1,5 +1,5 @@
 ﻿// Edge Function: статус ключей провайдеров (аналог api_keyinfo).
-import { verifyInitData, extractUser, getEnv, getSupabase, isWhitelisted, ensureUser, getUser, auditLog, checkRateLimit, corsPreflight, withCORS, resolveEffectiveApiKey } from "../_shared/shared.ts";
+import { verifyInitData, extractUser, getEnv, getSupabase, isBlacklisted, ensureUser, getUser, auditLog, checkRateLimit, corsPreflight, withCORS, resolveEffectiveApiKey } from "../_shared/shared.ts";
 
 const BOT_TOKEN = getEnv("BOT_TOKEN");
 
@@ -35,7 +35,7 @@ Deno.serve(async (req: Request) => {
     await auditLog(supabase, userId, "keyinfo_rate_limited", false);
     return json({ ok: false, error: "Слишком много запросов. Подождите минуту." }, 429);
   }
-  if (!(await isWhitelisted(supabase, userId))) { return json({ ok: false, error: "Нет доступа" }, 401); }
+  if (await isBlacklisted(supabase, userId)) { return json({ ok: false, error: "Нет доступа" }, 401); }
   await ensureUser(supabase, userId);
   const userRow = await getUser(supabase, userId);
 
@@ -51,10 +51,15 @@ Deno.serve(async (req: Request) => {
     } else {
       raw = userRow?.["api_key_" + p] || "";
       if (!raw && p === provider) raw = userRow?.api_key || "";
-      keys[p] = { has: !!raw, masked: maskKey(raw), auto: false };
+      if (raw && /^[•]+$/.test(raw)) raw = "";
+      keys[p] = { has: !!raw, masked: raw ? maskKey(raw) : "", auto: false };
     }
   }
   await auditLog(supabase, userId, "keyinfo_view", true);
   return json({ ok: true, provider, key_mode: mode, keys });
 });
+
+
+
+
 

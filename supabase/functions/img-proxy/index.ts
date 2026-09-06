@@ -1,9 +1,9 @@
-// Edge Function: img-proxy
-// Проксирует внешние картинки, чтобы Telegram WebApp не блокировал чужие домены.
-// GET /img-proxy?u=<url>  ->  отдаёт картинку с CORS-заголовками.
+﻿// Edge Function: img-proxy
+// РџСЂРѕРєСЃРёСЂСѓРµС‚ РІРЅРµС€РЅРёРµ РєР°СЂС‚РёРЅРєРё, С‡С‚РѕР±С‹ Telegram WebApp РЅРµ Р±Р»РѕРєРёСЂРѕРІР°Р» С‡СѓР¶РёРµ РґРѕРјРµРЅС‹.
+// GET /img-proxy?u=<url>  ->  РѕС‚РґР°С‘С‚ РєР°СЂС‚РёРЅРєСѓ СЃ CORS-Р·Р°РіРѕР»РѕРІРєР°РјРё.
 import { getSupabase, checkRateLimit, auditLog, corsPreflight, withCORS } from "../_shared/shared.ts";
 
-const MAX_BYTES = 15 * 1024 * 1024; // 15 МБ
+const MAX_BYTES = 15 * 1024 * 1024; // 15 РњР‘
 
 Deno.serve(async (req: Request) => {
   const pre = corsPreflight(req);
@@ -52,3 +52,7 @@ Deno.serve(async (req: Request) => {
     return withCORS(new Response("Proxy error: " + (e?.message || e), { status: 502 }));
   }
 });
+
+
+
+

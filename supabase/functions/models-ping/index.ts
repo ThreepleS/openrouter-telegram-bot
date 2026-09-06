@@ -1,5 +1,5 @@
 ﻿// Edge Function: пинг бесплатных моделей провайдера (аналог api_models_ping).
-import { verifyInitData, extractUser, getEnv, getSupabase, API_ENDPOINTS, isWhitelisted, ensureUser, getUser, buildUserProviderKeys, getProviderApiKey, resolveEffectiveApiKey, detectProvider, normalizeModelId, normalizeProviderModel, modelIdForProvider, buildOpenAIMessages, auditLog, checkRateLimit, corsPreflight, withCORS } from "../_shared/shared.ts";
+import { verifyInitData, extractUser, getEnv, getSupabase, API_ENDPOINTS, isBlacklisted, ensureUser, getUser, buildUserProviderKeys, getProviderApiKey, resolveEffectiveApiKey, detectProvider, normalizeModelId, normalizeProviderModel, modelIdForProvider, buildOpenAIMessages, auditLog, checkRateLimit, corsPreflight, withCORS } from "../_shared/shared.ts";
 
 const BOT_TOKEN = getEnv("BOT_TOKEN");
 
@@ -67,7 +67,7 @@ Deno.serve(async (req: Request) => {
     await auditLog(supabase, userId, "models_ping_rate_limited", false);
     return json({ ok: false, error: "Слишком много запросов. Подождите минуту." }, 429);
   }
-  if (!(await isWhitelisted(supabase, userId))) {return json({ ok: false, error: "Нет доступа" }, 401);
+  if (await isBlacklisted(supabase, userId)) {return json({ ok: false, error: "Нет доступа" }, 401);
   }
   await ensureUser(supabase, userId);
   const userRow = await getUser(supabase, userId);
@@ -115,4 +115,8 @@ Deno.serve(async (req: Request) => {
     failed: failed.length,
     results});return resp;
 });
+
+
+
+
 

@@ -1,5 +1,5 @@
-// Edge Function: dialogs (CRUD for dialogs stored in Supabase Postgres).
-import { verifyInitData, extractUser, getEnv, getSupabase, isWhitelisted, ensureUser, auditLog, checkRateLimit, encryptField, decryptField, corsPreflight, withCORS } from "../_shared/shared.ts";
+﻿// Edge Function: dialogs (CRUD for dialogs stored in Supabase Postgres).
+import { verifyInitData, extractUser, getEnv, getSupabase, isBlacklisted, ensureUser, auditLog, checkRateLimit, encryptField, decryptField, corsPreflight, withCORS } from "../_shared/shared.ts";
 
 const BOT_TOKEN = getEnv("BOT_TOKEN");
 const ADMIN_ID = Number(getEnv("ADMIN_ID") || 0);
@@ -21,23 +21,20 @@ Deno.serve(async (req: Request) => {
     const user = extractUser(initData);
     let userId: number | null = null;
     if (BOT_TOKEN && initData && user) {
-      
       const ok = await verifyInitData(initData, BOT_TOKEN);
-      
       if (!ok) return json({ ok: false, error: "Невалидные данные Telegram", step: "verifyInitData" }, 401);
       userId = user.id;
     } else if (getEnv("WEB_APP_DEV") && payload.user_id) {
       userId = Number(payload.user_id);
     }
-    if (userId == null) return json({ ok: false, error: "Не удалось определить пользователя", step: "extractUser" }, 401);const supabase = getSupabase(true);
-    
+    if (userId == null) return json({ ok: false, error: "Не удалось определить пользователя", step: "extractUser" }, 401);
+    const supabase = getSupabase(true);
+
     if (ADMIN_ID && String(userId) === String(ADMIN_ID)) {
-      
-    } else if (!(await isWhitelisted(supabase, userId))) {
-      
-      return json({ ok: false, error: "Нет доступа", step: "isWhitelisted" }, 401);
+    } else if (await isBlacklisted(supabase, userId)) {
+      return json({ ok: false, error: "Нет доступа", step: "isBlacklisted" }, 401);
     }
-    
+
     await ensureUser(supabase, userId);
 
     if (!(await checkRateLimit(supabase, userId))) {
@@ -54,14 +51,32 @@ Deno.serve(async (req: Request) => {
         .eq("user_id", userId)
         .order("updated_at", { ascending: false });
       if (error) return json({ ok: false, error: error.message }, 500);
-      const dialogs = await Promise.all((data || []).map(async (d: any) => ({
-        ...d,
-        name: await decryptField(d.name || ""),
-        messages: await Promise.all((Array.isArray(d.messages) ? d.messages : []).map(async (m: any) => ({
-          ...m,
-          content: await decryptField(m.content || ""),
-        }))),
-      })));
+      const dialogs = await Promise.all((data || []).map(async (d: any) => {
+        let name = await decryptField(d.name || "");
+        if (!name) name = `Диалог от ${new Date(d.updated_at || Date.now()).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" })}`;
+        const messages = await Promise.all((Array.isArray(d.messages) ? d.messages : []).map(async (m: any) => {
+          const decrypted: any = { ...m };
+          decrypted.content = await decryptField(m.content || "");
+          if (!decrypted.content) decrypted.content = m.content || "";
+          if (m.stats) {
+            let statsStr = await decryptField(m.stats);
+            if (statsStr === null) {
+              statsStr = m.stats;
+            }
+            if (statsStr) {
+              try { decrypted.stats = JSON.parse(statsStr); } catch { decrypted.stats = null; }
+            }
+          }
+          return decrypted;
+        }));
+        const row = { ...d, name, messages };
+        const nameChanged = d.name !== name && name !== null && name !== "";
+        const messagesChanged = JSON.stringify(d.messages) !== JSON.stringify(row.messages);
+        if ((nameChanged || messagesChanged) && name !== null) {
+          await supabase.from("dialogs").update({ name, messages }).eq("id", d.id).eq("user_id", userId);
+        }
+        return row;
+      }));
       await auditLog(supabase, userId, "dialogs_list", true);
       return json({ ok: true, dialogs });
     }
@@ -74,6 +89,7 @@ Deno.serve(async (req: Request) => {
       const encryptedMessages = await Promise.all((payload.messages || []).map(async (m: any) => ({
         ...m,
         content: await encryptField(m.content || ""),
+        stats: m.stats ? await encryptField(JSON.stringify(m.stats)) : null,
       })));
       const row = {
         id,
@@ -93,11 +109,14 @@ Deno.serve(async (req: Request) => {
       const id = String(payload.id || "").trim();
       if (!id) return json({ ok: false, error: "id обязателен" }, 400);
       const updates: any = { updated_at: Date.now() };
-      if (payload.name !== undefined) updates.name = await encryptField(String(payload.name).trim() || updates.name);
+      if (payload.name !== undefined && String(payload.name).trim()) {
+        updates.name = await encryptField(String(payload.name).trim());
+      }
       if (payload.messages !== undefined) {
         updates.messages = await Promise.all((Array.isArray(payload.messages) ? payload.messages : []).map(async (m: any) => ({
           ...m,
           content: await encryptField(m.content || ""),
+          stats: m.stats ? await encryptField(JSON.stringify(m.stats)) : null,
         })));
       }
       if (payload.model !== undefined) updates.model = String(payload.model).trim();

@@ -1,5 +1,5 @@
 ﻿// Edge Function: очистка истории (аналог api_chat_clear).
-import { verifyInitData, extractUser, getEnv, getSupabase, isWhitelisted, ensureUser, auditLog, checkRateLimit, corsPreflight, withCORS } from "../_shared/shared.ts";
+import { verifyInitData, extractUser, getEnv, getSupabase, isBlacklisted, ensureUser, auditLog, checkRateLimit, corsPreflight, withCORS } from "../_shared/shared.ts";
 
 const BOT_TOKEN = getEnv("BOT_TOKEN");
 
@@ -30,8 +30,8 @@ Deno.serve(async (req: Request) => {
     await auditLog(supabase, userId, "chat_clear_rate_limited", false);
     return json({ ok: false, error: "Слишком много запросов. Подождите минуту." }, 429);
   }
-  if (!(await isWhitelisted(supabase, userId))) {
-    await auditLog(supabase, userId, "chat_clear_whitelist_fail", false);
+  if (await isBlacklisted(supabase, userId)) {
+    await auditLog(supabase, userId, "chat_clear_blacklist_fail", false);
     return json({ ok: false, error: "Нет доступа" }, 401);
   }
   await ensureUser(supabase, userId);
@@ -39,4 +39,8 @@ Deno.serve(async (req: Request) => {
   await auditLog(supabase, userId, "chat_clear", true);
   return json({ ok: true, cleared: true });
 });
+
+
+
+
 

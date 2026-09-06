@@ -9,4 +9,13 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 startup_log.txt
+*.log
+*.err
+*.exe
+.ssh/
+.kilo/
+node_modules/
+repomix-output.md
+gh-pages/
+scripts/legacy_fixes/
 .DS_Store

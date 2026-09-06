@@ -1,5 +1,5 @@
 ﻿// Edge Function: избранные модели (аналог api_favorites).
-import { verifyInitData, extractUser, getEnv, getSupabase, isWhitelisted, ensureUser, auditLog, checkRateLimit, corsPreflight, withCORS } from "../_shared/shared.ts";
+import { verifyInitData, extractUser, getEnv, getSupabase, isBlacklisted, ensureUser, auditLog, checkRateLimit, corsPreflight, withCORS } from "../_shared/shared.ts";
 
 const BOT_TOKEN = getEnv("BOT_TOKEN");
 
@@ -39,10 +39,10 @@ Deno.serve(async (req: Request) => {
     await auditLog(supabase, userId, "favorites_rate_limited", false);
     return json({ ok: false, error: "Слишком много запросов. Подождите минуту." }, 429);
   }
-  if (!(await isWhitelisted(supabase, userId))) return json({ ok: false, error: "Нет доступа" }, 401);
+  if (await isBlacklisted(supabase, userId)) return json({ ok: false, error: "Нет доступа" }, 401);
   await ensureUser(supabase, userId);
 
-  const { data } = await supabase.from("user_models").select("*").eq("user_id", userId).order("added_at", { ascending: true });
+  const { data } = await supabase.from("user_models").select("*").eq("user_id", userId).order("blocked_at", { ascending: true });
   const favorites = (data || []).map((m: any) => {
     m.provider = detectProvider(m.model_id);
     return m;
@@ -50,4 +50,8 @@ Deno.serve(async (req: Request) => {
   await auditLog(supabase, userId, "favorites_list", true);
   return json({ ok: true, models: favorites });
 });
+
+
+
+
 

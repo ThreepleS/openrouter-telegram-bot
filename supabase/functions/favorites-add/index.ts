@@ -1,5 +1,5 @@
 ﻿// Edge Function: добавить модель в избранное (аналог api_favorite_add).
-import { verifyInitData, extractUser, getEnv, getSupabase, isWhitelisted, ensureUser, auditLog, checkRateLimit, corsPreflight, withCORS } from "../_shared/shared.ts";
+import { verifyInitData, extractUser, getEnv, getSupabase, isBlacklisted, ensureUser, auditLog, checkRateLimit, corsPreflight, withCORS } from "../_shared/shared.ts";
 
 const BOT_TOKEN = getEnv("BOT_TOKEN");
 
@@ -39,7 +39,7 @@ Deno.serve(async (req: Request) => {
     await auditLog(supabase, userId, "favorites_add_rate_limited", false);
     return json({ ok: false, error: "Слишком много запросов. Подождите минуту." }, 429);
   }
-  if (!(await isWhitelisted(supabase, userId))) {return json({ ok: false, error: "Нет доступа" }, 401);
+  if (await isBlacklisted(supabase, userId)) {return json({ ok: false, error: "Нет доступа" }, 401);
   }
   await ensureUser(supabase, userId);
 
@@ -49,7 +49,7 @@ Deno.serve(async (req: Request) => {
     display_name: (payload.display_name || modelId).trim(),
     meta: payload.meta || null,
     short_id: sha1Short(modelId),
-    added_at: Math.floor(Date.now() / 1000),
+    blocked_at: Math.floor(Date.now() / 1000),
     context: payload.context ?? null,
     mod_in: payload.mod_in ?? null,
     mod_out: payload.mod_out ?? null,
@@ -61,4 +61,8 @@ Deno.serve(async (req: Request) => {
   await auditLog(supabase, userId, "favorites_add", true, modelId);
   return json({ ok: true, model_id: modelId });
 });
+
+
+
+
 

@@ -1,5 +1,5 @@
 ﻿// Edge Function: auth (аналог api_auth + api_whoami).
-import { verifyInitData, extractUser, getEnv, getSupabase, isWhitelisted, ensureUser, getUser, auditLog, checkRateLimit, decryptField, corsPreflight, withCORS, resolveEffectiveApiKey } from "../_shared/shared.ts";
+import { verifyInitData, extractUser, getEnv, getSupabase, isBlacklisted, ensureUser, getUser, auditLog, checkRateLimit, decryptField, corsPreflight, withCORS, resolveEffectiveApiKey } from "../_shared/shared.ts";
 
 const BOT_TOKEN = getEnv("BOT_TOKEN");
 const ADMIN_ID = Number(getEnv("ADMIN_ID") || 0);
@@ -33,8 +33,8 @@ Deno.serve(async (req: Request) => {
     return json({ ok: false, error: "Слишком много запросов. Подождите минуту." }, 429);
   }
 
-  if (!(await isWhitelisted(supabase, userId))) {
-    await auditLog(supabase, userId, "auth_whitelist_fail", false);
+  if (await isBlacklisted(supabase, userId)) {
+    await auditLog(supabase, userId, "auth_blacklist_fail", false);
     return json({ ok: false, error: "Нет доступа. Запросите доступ у администратора." }, 401);
   }
   await auditLog(supabase, userId, "auth_success", true);
@@ -103,3 +103,7 @@ Deno.serve(async (req: Request) => {
       vib_strength: userRow.vib_strength,
       recommended_models: recommendedModels}});
 });
+
+
+
+

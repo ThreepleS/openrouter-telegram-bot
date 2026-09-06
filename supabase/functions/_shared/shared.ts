@@ -1,9 +1,9 @@
-// Общий код для всех Edge Functions: проверка initData Telegram, доступ к БД,
-// утилиты провайдеров. Повторяет логику src/web/auth.py и src/ai/providers.py.
+﻿// РћР±С‰РёР№ РєРѕРґ РґР»СЏ РІСЃРµС… Edge Functions: РїСЂРѕРІРµСЂРєР° initData Telegram, РґРѕСЃС‚СѓРї Рє Р‘Р”,
+// СѓС‚РёР»РёС‚С‹ РїСЂРѕРІР°Р№РґРµСЂРѕРІ. РџРѕРІС‚РѕСЂСЏРµС‚ Р»РѕРіРёРєСѓ src/web/auth.py Рё src/ai/providers.py.
 
 import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-// --- CORS (фронтенд на GitHub Pages -> *.supabase.co) ---
+// --- CORS (С„СЂРѕРЅС‚РµРЅРґ РЅР° GitHub Pages -> *.supabase.co) ---
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-requested-with",
@@ -11,7 +11,7 @@ const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Max-Age": "86400",
 };
 
-// Возвращает ответ на preflight OPTIONS (или null, если метод не OPTIONS).
+// Р’РѕР·РІСЂР°С‰Р°РµС‚ РѕС‚РІРµС‚ РЅР° preflight OPTIONS (РёР»Рё null, РµСЃР»Рё РјРµС‚РѕРґ РЅРµ OPTIONS).
 function corsPreflight(req: Request): Response | null {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: CORS_HEADERS });
@@ -19,7 +19,7 @@ function corsPreflight(req: Request): Response | null {
   return null;
 }
 
-// Дописывает CORS-заголовки в любой ответ.
+// Р”РѕРїРёСЃС‹РІР°РµС‚ CORS-Р·Р°РіРѕР»РѕРІРєРё РІ Р»СЋР±РѕР№ РѕС‚РІРµС‚.
 function withCORS(res: Response): Response {
   const h = new Headers(res.headers);
   for (const [k, v] of Object.entries(CORS_HEADERS)) h.set(k, v);
@@ -41,6 +41,7 @@ interface ApiEndpoints {
   openai_models: string;
   gemini_chat: string;
   gemini_models: string;
+  gemini_cached_contents: string;
   groq_chat: string;
   groq_models: string;
   huggingface_models: string;
@@ -55,6 +56,7 @@ const API_ENDPOINTS: ApiEndpoints = {
   openai_models: "https://api.openai.com/v1/models",
   gemini_chat: "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
   gemini_models: "https://generativelanguage.googleapis.com/v1beta/models",
+  gemini_cached_contents: "https://generativelanguage.googleapis.com/v1beta/cachedContents",
   groq_chat: "https://api.groq.com/openai/v1/chat/completions",
   groq_models: "https://api.groq.com/openai/v1/models",
   huggingface_models: "https://router.huggingface.co/api/models",
@@ -62,9 +64,9 @@ const API_ENDPOINTS: ApiEndpoints = {
   venice_models: "https://api.venice.ai/api/v1/models",
 };
 
-// --- Аутентификация Telegram initData ---
+// --- РђСѓС‚РµРЅС‚РёС„РёРєР°С†РёСЏ Telegram initData ---
 
-// Асинхронная проверка initData (HMAC-SHA256, ключ = HMAC_SHA256("WebAppData", bot_token))
+// РђСЃРёРЅС…СЂРѕРЅРЅР°СЏ РїСЂРѕРІРµСЂРєР° initData (HMAC-SHA256, РєР»СЋС‡ = HMAC_SHA256("WebAppData", bot_token))
 async function verifyInitData(initData: string, botToken: string): Promise<boolean> {
   if (!initData || !botToken) return false;
   const params = new URLSearchParams(initData);
@@ -145,21 +147,21 @@ function getSupabase(useServiceRole = true): SupabaseClient {
   });
 }
 
-// --- Работа с БД (аналог repository.py) ---
-async function isWhitelisted(supabase: SupabaseClient, userId: number): Promise<boolean> {
+// --- Р Р°Р±РѕС‚Р° СЃ Р‘Р” (Р°РЅР°Р»РѕРі repository.py) ---
+async function isBlacklisted(supabase: SupabaseClient, userId: number): Promise<boolean> {
   const adminId = getEnv("ADMIN_ID");
-  console.log("[isWhitelisted] userId=" + userId + " adminId=" + adminId + " match=" + (adminId && String(userId) === String(adminId)));
-  if (adminId && String(userId) === String(adminId)) return true;
-  const { data: setting } = await supabase.from("site_settings").select("value").eq("key", "whitelist_enabled").maybeSingle();
+  console.log("[isBlacklisted] userId=" + userId + " adminId=" + adminId + " match=" + (adminId && String(userId) === String(adminId)));
+  if (adminId && String(userId) === String(adminId)) return false;
+  const { data: setting } = await supabase.from("site_settings").select("value").eq("key", "blacklist_enabled").maybeSingle();
   const enabled = setting?.value !== "false";
-  console.log("[isWhitelisted] whitelist_enabled=" + enabled);
-  if (!enabled) return true;
+  console.log("[isBlacklisted] blacklist_enabled=" + enabled);
+  if (!enabled) return false;
   const { data } = await supabase
-    .from("whitelist")
+    .from("blacklist")
     .select("user_id")
     .eq("user_id", userId)
     .maybeSingle();
-  console.log("[isWhitelisted] db result=" + (data != null));
+  console.log("[isBlacklisted] db result=" + (data != null));
   return data != null;
 }
 
@@ -175,10 +177,21 @@ async function getUser(supabase: SupabaseClient, userId: number): Promise<any> {
     .maybeSingle();
   if (!data) return null;
   for (const col of Object.values(PROVIDER_KEY_COLS)) {
-    if (data[col]) data[col] = await decryptApiKey(data[col]);
+    const raw = data[col];
+    if (raw && typeof raw === "string" && !/^[вЂў]+$/.test(raw)) {
+      data[col] = await decryptApiKey(raw);
+    } else if (raw && /^[вЂў]+$/.test(raw)) {
+      data[col] = "";
+    }
   }
-  if (data.api_key) data.api_key = await decryptApiKey(data.api_key);
-  if (data.system_prompt) data.system_prompt = await decryptField(data.system_prompt);
+  if (data.api_key && typeof data.api_key === "string" && !/^[вЂў]+$/.test(data.api_key)) {
+    data.api_key = await decryptApiKey(data.api_key);
+  } else if (data.api_key && /^[вЂў]+$/.test(data.api_key)) {
+    data.api_key = "";
+  }
+  if (data.system_prompt && typeof data.system_prompt === "string") {
+    data.system_prompt = await decryptField(data.system_prompt);
+  }
   return data;
 }
 
@@ -206,9 +219,8 @@ function buildUserProviderKeys(user: any): Record<string, string> {
 function detectProvider(modelId: string): string {
   const lower = modelId.toLowerCase();
   if (lower.startsWith("openai:")) return "openai";
-  // Только явный префикс gemini: или models/gemini- означают прямой Google API.
-  // ID вида google/gemini-... идут через OpenRouter (возвращаем openrouter).
   if (lower.startsWith("gemini:") || lower.startsWith("models/gemini-")) return "gemini";
+  if (lower.startsWith("google/gemini-") || lower.startsWith("gemini-")) return "gemini";
   if (lower.startsWith("groq:")) return "groq";
   if (lower.startsWith("hf:")) return "huggingface";
   if (lower.startsWith("venice:")) return "venice";
@@ -225,10 +237,13 @@ function normalizeModelId(provider: string, modelId: string): string {
     venice: "venice:",
   };
   const prefix = prefixes[provider];
-  // Снимаем провайдерный префикс (gemini:), затем служебный путь models/.
   let id = modelId;
   if (prefix && id.toLowerCase().startsWith(prefix)) id = id.slice(prefix.length);
-  if (provider === "gemini" && id.toLowerCase().startsWith("models/")) id = id.slice(7);
+  if (provider === "gemini") {
+    if (id.toLowerCase().startsWith("google/gemini-")) id = id.slice(14);
+    if (id.toLowerCase().startsWith("gemini-")) id = id.slice(7);
+    if (id.toLowerCase().startsWith("models/")) id = id.slice(7);
+  }
   return id;
 }
 
@@ -257,8 +272,8 @@ function getProviderApiKey(
   userApiKeyProvider: string,
   dbProviderKeys: Record<string, string>,
 ): string {
-  // Ключи строго персональные: берём из БД пользователя, env-ключи НЕ
-  // используем (иначе ключ админа применялся бы ко всем пользователям).
+  // РљР»СЋС‡Рё СЃС‚СЂРѕРіРѕ РїРµСЂСЃРѕРЅР°Р»СЊРЅС‹Рµ: Р±РµСЂС‘Рј РёР· Р‘Р” РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ, env-РєР»СЋС‡Рё РќР•
+  // РёСЃРїРѕР»СЊР·СѓРµРј (РёРЅР°С‡Рµ РєР»СЋС‡ Р°РґРјРёРЅР° РїСЂРёРјРµРЅСЏР»СЃСЏ Р±С‹ РєРѕ РІСЃРµРј РїРѕР»СЊР·РѕРІР°С‚РµР»СЏРј).
   const dbKey = dbProviderKeys?.[provider] || "";
   if (dbKey) return dbKey;
   if (userApiKey && userApiKeyProvider === provider) return userApiKey;
@@ -326,7 +341,7 @@ function buildGeminiContents(messages: any[], provider: string, modelId: string)
       const mime = m.image_mime || "image/jpeg";
       parts.push({ inline_data: { mime_type: mime, data: imageBytes } });
     } else if (imageBytes && !supportsVision) {
-      let c = content ? `${content}\n\n[Пользователь ранее отправил изображение]` : "[Пользователь отправил изображение без подписи]";
+      let c = content ? `${content}\n\n[РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ СЂР°РЅРµРµ РѕС‚РїСЂР°РІРёР» РёР·РѕР±СЂР°Р¶РµРЅРёРµ]` : "[РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ РѕС‚РїСЂР°РІРёР» РёР·РѕР±СЂР°Р¶РµРЅРёРµ Р±РµР· РїРѕРґРїРёСЃРё]";
       parts.push({ text: c });
     } else if (content) {
       parts.push({ text: content });
@@ -358,7 +373,7 @@ function extractGeminiContent(data: any): string {
   const parts = cands[0]?.content?.parts || [];
   const texts: string[] = [];
   for (const p of parts) {
-    // Пропускаем "размышления" модели (thought: true) — пользователю они не нужны.
+    // РџСЂРѕРїСѓСЃРєР°РµРј "СЂР°Р·РјС‹С€Р»РµРЅРёСЏ" РјРѕРґРµР»Рё (thought: true) вЂ” РїРѕР»СЊР·РѕРІР°С‚РµР»СЋ РѕРЅРё РЅРµ РЅСѓР¶РЅС‹.
     if (p && p.thought) continue;
     if (p && typeof p.text === "string") texts.push(p.text);
     else if (typeof p === "string") texts.push(p);
@@ -373,6 +388,8 @@ function extractUsage(data: any, provider: string): any {
       prompt_tokens: m.promptTokenCount,
       completion_tokens: m.candidatesTokenCount,
       total_tokens: m.totalTokenCount,
+      thinking_tokens: m.thoughtsTokenCount,
+      cached_tokens: m.cachedContentTokenCount,
     };
   }
   return data.usage || {};
@@ -381,7 +398,15 @@ function extractUsage(data: any, provider: string): any {
 function isOpenrouterFreeModel(raw: any): boolean {
   if (raw == null) return false;
   if (typeof raw.id === "string" && raw.id.endsWith(":free")) return true;
-  if (raw.pricing && typeof raw.pricing.prompt === "string" && parseFloat(raw.pricing.prompt) === 0) return true;
+  const pricing = raw.pricing;
+  if (pricing) {
+    const prompt = pricing.prompt;
+    const completion = pricing.completion;
+    // Handle both string and number pricing
+    const promptCost = typeof prompt === "string" ? parseFloat(prompt) : (typeof prompt === "number" ? prompt : NaN);
+    const completionCost = typeof completion === "string" ? parseFloat(completion) : (typeof completion === "number" ? completion : NaN);
+    if (!isNaN(promptCost) && promptCost === 0 && !isNaN(completionCost) && completionCost === 0) return true;
+  }
   return false;
 }
 
@@ -433,8 +458,8 @@ function normalizeProviderModel(provider: string, raw: any): any {
   if (provider === "venice") {
     const rawId = typeof raw === "string" ? raw : raw.id;
     if (!rawId) return null;
-    // Префикс venice: обязателен, чтобы detectProvider/чат понимали прямой Venice API
-    // и карточка показывала правильного провайдера (а не openrouter/gemini по detectProvider).
+    // РџСЂРµС„РёРєСЃ venice: РѕР±СЏР·Р°С‚РµР»РµРЅ, С‡С‚РѕР±С‹ detectProvider/С‡Р°С‚ РїРѕРЅРёРјР°Р»Рё РїСЂСЏРјРѕР№ Venice API
+    // Рё РєР°СЂС‚РѕС‡РєР° РїРѕРєР°Р·С‹РІР°Р»Р° РїСЂР°РІРёР»СЊРЅРѕРіРѕ РїСЂРѕРІР°Р№РґРµСЂР° (Р° РЅРµ openrouter/gemini РїРѕ detectProvider).
     const id = rawId.toLowerCase().startsWith("venice:") ? rawId : `venice:${rawId}`;
     const spec = raw.model_spec || {};
     const caps = spec.capabilities || {};
@@ -452,7 +477,7 @@ function normalizeProviderModel(provider: string, raw: any): any {
       context: spec.availableContextTokens || raw.context_length || null,
       mod_in: inMods.join(","),
       mod_out: "text",
-      // Venice model_spec.pricing.*.usd — уже цена ЗА 1М токенов (не умножаем повторно).
+      // Venice model_spec.pricing.*.usd вЂ” СѓР¶Рµ С†РµРЅР° Р—Рђ 1Рњ С‚РѕРєРµРЅРѕРІ (РЅРµ СѓРјРЅРѕР¶Р°РµРј РїРѕРІС‚РѕСЂРЅРѕ).
       price_prompt: pr.input && pr.input.usd != null ? String(pr.input.usd) : null,
       price_completion: pr.output && pr.output.usd != null ? String(pr.output.usd) : null,
       price_cache: pr.cache_input && pr.cache_input.usd != null ? String(pr.cache_input.usd) : null,
@@ -470,10 +495,10 @@ function normalizeProviderModel(provider: string, raw: any): any {
   if (provider === "gemini") {
     const rawId = typeof raw === "string" ? raw : (raw.id || raw.name || raw.baseModelId);
     if (!rawId) return null;
-    // Префикс gemini: обязателен, чтобы detectProvider/chat понимали прямой Google API.
+    // РџСЂРµС„РёРєСЃ gemini: РѕР±СЏР·Р°С‚РµР»РµРЅ, С‡С‚РѕР±С‹ detectProvider/chat РїРѕРЅРёРјР°Р»Рё РїСЂСЏРјРѕР№ Google API.
     const id = rawId.toLowerCase().startsWith("gemini:") ? rawId : `gemini:${rawId}`;
     const name = (raw.name && raw.name !== rawId) ? raw.name : rawId;
-    // Детали (context/description/vision) дотягиваются через getModel в fetchProviderModels.
+    // Р”РµС‚Р°Р»Рё (context/description/vision) РґРѕС‚СЏРіРёРІР°СЋС‚СЃСЏ С‡РµСЂРµР· getModel РІ fetchProviderModels.
     const d = raw._detail || {};
     const methods: string[] = d.supportedGenerationMethods || [];
     const isEmbedding = /embedding|^aqa/.test(id.toLowerCase());
@@ -534,13 +559,21 @@ function getCryptoKey(): { key: CryptoKey | null; raw: string } {
   if (!raw || raw.length < 32) return { key: null, raw: "" };
   if (cachedCryptoKey && cachedRawKey === raw) return { key: cachedCryptoKey, raw };
   cachedRawKey = raw;
-  const enc = new TextEncoder();
-  return { key: null, raw };
+  return { key: null, raw: cachedRawKey };
 }
 
 async function importCryptoKey(raw: string): Promise<CryptoKey | null> {
   try {
-    return await crypto.subtle.importKey("raw", new TextEncoder().encode(raw), { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+    let keyBytes: Uint8Array;
+    if (raw.length === 64 && /^[0-9a-fA-F]+$/.test(raw)) {
+      keyBytes = new Uint8Array(32);
+      for (let i = 0; i < 32; i++) {
+        keyBytes[i] = parseInt(raw.slice(i * 2, i * 2 + 2), 16);
+      }
+    } else {
+      keyBytes = new TextEncoder().encode(raw);
+    }
+    return await crypto.subtle.importKey("raw", keyBytes, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
   } catch (_) {
     return null;
   }
@@ -604,6 +637,100 @@ async function decryptApiKey(ciphertext: string): Promise<string> {
   return decryptField(ciphertext);
 }
 
+// --- Gemini Prompt Caching ---------------------------------------------
+
+const CACHE_TRIGGER_TOKENS = 32000; // Create cache when history exceeds this
+const CACHE_TTL_SECONDS = 300; // 5 minutes
+
+function estimateTokenCount(text: string): number {
+  if (!text) return 0;
+  // Rough estimation: ~3.5 chars per token for mixed text
+  return Math.ceil(text.length / 3.5);
+}
+
+async function getOrCreateGeminiCache(
+  supabase: any,
+  userId: number,
+  modelId: string,
+  systemPrompt: string,
+  history: any[],
+  apiKey: string
+): Promise<{ cacheName: string | null; cachedHistory: any[] }> {
+  // Estimate tokens in the static prefix (system prompt + older history)
+  const staticPrefix = [
+    { role: "user", parts: [{ text: systemPrompt }] },
+    ...history.slice(0, -10).map((m) => ({
+      role: m.role === "user" ? "user" : "model",
+      parts: [{ text: m.content || "" }]
+    }))
+  ];
+  
+  const estimatedTokens = staticPrefix.reduce((sum, m) => {
+    const text = m.parts?.[0]?.text || m.content || "";
+    return sum + estimateTokenCount(text);
+  }, 0);
+
+  if (estimatedTokens < CACHE_TRIGGER_TOKENS) {
+    return { cacheName: null, cachedHistory: history };
+  }
+
+  // Check if we have a valid cache for this user/model
+  const { data: cacheData } = await supabase
+    .from("gemini_cache")
+    .select("*")
+    .eq("user_id", userId)
+    .eq("model_id", modelId)
+    .gt("expires_at", new Date().toISOString())
+    .single();
+
+  if (cacheData?.cache_name) {
+    // Cache exists and is valid - use it
+    return { 
+      cacheName: cacheData.cache_name, 
+      cachedHistory: history.slice(-10) // Only send recent messages
+    };
+  }
+
+  // Create new cache
+  try {
+    const cachePayload = {
+      model: `models/${modelId}`,
+      contents: staticPrefix,
+      ttl: `${CACHE_TTL_SECONDS}s`
+    };
+
+    const resp = await fetch(`${API_ENDPOINTS.gemini_cached_contents}?key=${apiKey}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(cachePayload)
+    });
+
+    if (resp.ok) {
+      const data = await resp.json();
+      const cacheName = data.name; // e.g., "cachedContents/abc123"
+      
+      // Store in DB
+      const expiresAt = new Date(Date.now() + CACHE_TTL_SECONDS * 1000).toISOString();
+      await supabase.from("gemini_cache").upsert({
+        user_id: userId,
+        model_id: modelId,
+        cache_name: cacheName,
+        expires_at: expiresAt,
+        token_count: estimatedTokens
+      }, { onConflict: "user_id,model_id" });
+
+      return { 
+        cacheName, 
+        cachedHistory: history.slice(-10) 
+      };
+    }
+  } catch (e) {
+    console.warn("[gemini cache] failed to create cache:", e);
+  }
+
+  return { cacheName: null, cachedHistory: history };
+}
+
 export {
   verifyInitData,
   extractUser,
@@ -611,7 +738,7 @@ export {
   getSupabase,
   API_ENDPOINTS,
   PROVIDER_KEY_COLS,
-  isWhitelisted,
+  isBlacklisted,
   ensureUser,
   getUser,
   buildUserProviderKeys,
@@ -638,4 +765,9 @@ export {
   tryDecryptField,
   encryptApiKey,
   decryptApiKey,
+  getOrCreateGeminiCache,
 };
+
+
+
+

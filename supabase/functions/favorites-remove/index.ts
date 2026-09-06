@@ -1,5 +1,5 @@
 ﻿// Edge Function: удалить модель из избранного (аналог api_favorite_remove).
-import { verifyInitData, extractUser, getEnv, getSupabase, isWhitelisted, ensureUser, auditLog, checkRateLimit, corsPreflight, withCORS } from "../_shared/shared.ts";
+import { verifyInitData, extractUser, getEnv, getSupabase, isBlacklisted, ensureUser, auditLog, checkRateLimit, corsPreflight, withCORS } from "../_shared/shared.ts";
 
 const BOT_TOKEN = getEnv("BOT_TOKEN");
 
@@ -31,7 +31,7 @@ Deno.serve(async (req: Request) => {
     await auditLog(supabase, userId, "favorites_remove_rate_limited", false);
     return json({ ok: false, error: "Слишком много запросов. Подождите минуту." }, 429);
   }
-  if (!(await isWhitelisted(supabase, userId))) {return json({ ok: false, error: "Нет доступа" }, 401);
+  if (await isBlacklisted(supabase, userId)) {return json({ ok: false, error: "Нет доступа" }, 401);
   }
   await ensureUser(supabase, userId);
 
@@ -39,3 +39,7 @@ Deno.serve(async (req: Request) => {
   await auditLog(supabase, userId, "favorites_remove", true, modelId);
   return json({ ok: true, removed: count ?? 0, model_id: modelId });
 });
+
+
+
+

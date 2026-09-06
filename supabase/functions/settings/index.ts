@@ -1,41 +1,16 @@
 ﻿// Edge Function: settings (сохранение ключей/модели/промпта). Аналог api_settings.
-import { verifyInitData, extractUser, getEnv, getSupabase, isWhitelisted, ensureUser, getUser, PROVIDER_KEY_COLS, auditLog, checkRateLimit, encryptApiKey, decryptApiKey, corsPreflight, withCORS } from "../_shared/shared.ts";
+import { verifyInitData, extractUser, getEnv, getSupabase, isBlacklisted, ensureUser, getUser, PROVIDER_KEY_COLS, auditLog, checkRateLimit, encryptField, decryptField, encryptApiKey, decryptApiKey, corsPreflight, withCORS } from "../_shared/shared.ts";
 
 const BOT_TOKEN = getEnv("BOT_TOKEN");
 const PROVIDER_LABELS: Record<string, string> = { openrouter: "OpenRouter", openai: "OpenAI", gemini: "Gemini", groq: "Groq", huggingface: "HuggingFace", venice: "Venice AI" };
 const ADMIN_ID = Number(getEnv("ADMIN_ID") || 0);
-
-function validateProviderKey(provider: string, key: string): string | null {
-  console.log("[validateProviderKey]", provider, key.slice(0, 12) + "...");
-  if (!key || key.length < 8) return "Ключ слишком короткий";
-  const minLen = provider === "gemini" ? 20 : provider === "groq" ? 20 : 16;
-  if (key.length < minLen) return `Ключ слишком короткий (минимум ${minLen} символов)`;
-  const pattern = PROVIDER_KEY_PREFIXES[provider];
-  if (pattern && !pattern.test(key)) return `Неверный формат ключа для ${PROVIDER_LABELS[provider] || provider}`;
-  return null;
-}
-
-const PROVIDER_KEY_PREFIXES: Record<string, RegExp> = {
-  openrouter: /^sk-or-[A-Za-z0-9-]+$/i,
-  openai: /^sk-[A-Za-z0-9-]+$/i,
-  gemini: /^(AIza[A-Za-z0-9\-_]+|AQ\.[A-Za-z0-9\.\-_]+)$/i,
-  groq: /^gsk_[A-Za-z0-9]+$/i,
-  huggingface: /^hf_[A-Za-z0-9]+$/i,
-  venice: /^[A-Za-z0-9\-_]{16}$/i};
-
-const PROVIDER_KEY_MIN_LEN: Record<string, number> = {
-  openrouter: 16,
-  openai: 16,
-  gemini: 20,
-  groq: 20,
-  huggingface: 16,
-  venice: 16};
 
 function json(payload: any, status = 200) {
   return withCORS(new Response(JSON.stringify(payload), { status, headers: { "Content-Type": "application/json; charset=utf-8" } }));
 }
 
 Deno.serve(async (req: Request) => {
+  try {
   const pre = corsPreflight(req);
   if (pre) return pre;
   if (req.method !== "POST") return json({ ok: false, error: "Метод не поддерживается" }, 405);
@@ -58,7 +33,7 @@ Deno.serve(async (req: Request) => {
     await auditLog(supabase, userId, "settings_rate_limited", false);
     return json({ ok: false, error: "Слишком много запросов. Подождите минуту." }, 429);
   }
-  if (!(await isWhitelisted(supabase, userId))) return json({ ok: false, error: "Нет доступа" }, 401);
+  if (await isBlacklisted(supabase, userId)) return json({ ok: false, error: "Нет доступа" }, 401);
   await ensureUser(supabase, userId);
 
   const updates: any = {};
@@ -66,8 +41,9 @@ Deno.serve(async (req: Request) => {
     const key = String(payload.api_key).trim();
     let provider = payload.api_key_provider || (await getUser(supabase, userId))?.api_key_provider || "openrouter";
     if (!PROVIDER_LABELS[provider]) return json({ ok: false, error: "Неизвестный провайдер" }, 400);
-    const err = validateProviderKey(provider, key);
-    if (err) return json({ ok: false, error: err }, 400);
+    if (/^[•]+$/.test(key)) {
+      return json({ ok: false, error: "Невалидный ключ" }, 400);
+    }
     const encrypted = await encryptApiKey(key);
     updates.api_key = encrypted;
     updates.api_key_provider = provider;
@@ -80,10 +56,7 @@ Deno.serve(async (req: Request) => {
     for (const p of Object.keys(providerKeys)) {
       if (!PROVIDER_KEY_COLS[p]) continue;
       const v = providerKeys[p] ? String(providerKeys[p]).trim() : null;
-      if (v) {
-        const err = validateProviderKey(p, v);
-        if (err) return json({ ok: false, error: err }, 400);
-      }
+      if (v && /^[•]+$/.test(v)) continue;
       updates[PROVIDER_KEY_COLS[p]] = v ? await encryptApiKey(v) : null;
     }
   }
@@ -212,4 +185,12 @@ Deno.serve(async (req: Request) => {
       is_admin: isAdminUser,
       recommended_models: recommendedModels,
     }});
+  } catch (e: any) {
+    console.error("[settings] fatal", e);
+    return json({ ok: false, error: `Внутренняя ошибка: ${e?.message || e}` }, 500);
+  }
 });
+
+
+
+

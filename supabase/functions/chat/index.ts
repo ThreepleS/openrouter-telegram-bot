@@ -2,7 +2,7 @@
 // Настоящий server-side streaming: ReadableStream отдаёт ndjson-события
 // (start/delta/result) по мере поступления токенов от провайдера.
 
-import { verifyInitData, extractUser, getEnv, getSupabase, API_ENDPOINTS, isWhitelisted, ensureUser, getUser, buildUserProviderKeys, detectProvider, normalizeModelId, getProviderApiKey, resolveEffectiveApiKey, buildOpenAIMessages, buildGeminiContents, extractOpenAIContent, extractGeminiContent, extractUsage, auditLog, checkRateLimit, corsPreflight, withCORS } from "../_shared/shared.ts";
+import { verifyInitData, extractUser, getEnv, getSupabase, API_ENDPOINTS, isBlacklisted, ensureUser, getUser, buildUserProviderKeys, detectProvider, normalizeModelId, getProviderApiKey, resolveEffectiveApiKey, buildOpenAIMessages, buildGeminiContents, extractOpenAIContent, extractGeminiContent, extractUsage, auditLog, checkRateLimit, encryptField, decryptField, corsPreflight, withCORS, getOrCreateGeminiCache } from "../_shared/shared.ts";
 
 const BOT_TOKEN = getEnv("BOT_TOKEN");
 
@@ -31,15 +31,26 @@ function historyToMessages(history: any[]): any[] {
 }
 
 function getProviderHeaders(provider: string, key: string): Record<string, string> {
+  const safeKey = String(key || "");
+  if (!safeKey) return { "Content-Type": "application/json" };
   if (provider === "gemini") {
-    return { "Content-Type": "application/json", "x-goog-api-key": key };
+    return { "Content-Type": "application/json", "x-goog-api-key": safeKey };
   }
-  const h: Record<string, string> = { "Authorization": `Bearer ${key}`, "Content-Type": "application/json" };
+  const h: Record<string, string> = { "Authorization": `Bearer ${safeKey}`, "Content-Type": "application/json" };
   if (provider === "openrouter") {
     h["HTTP-Referer"] = "https://t.me/openrouter_bot";
     h["X-Title"] = "OpenRouter Telegram Bot";
   }
   return h;
+}
+
+function toHeaders(provider: string, key: string): Headers {
+  const h = getProviderHeaders(provider, key);
+  const out = new Headers();
+  for (const [k, v] of Object.entries(h)) {
+    out.set(k, String(v));
+  }
+  return out;
 }
 
 function getProviderUrl(provider: string, normalizedModel: string): string {
@@ -59,10 +70,15 @@ function buildPayload(provider: string, normalizedModel: string, systemPrompt: s
       contents: buildGeminiContents(messages, provider, normalizedModel),
       system_instruction: { parts: [{ text: systemPrompt }] }};
   }
-  return {
+  const base = {
     model: normalizedModel,
     messages: buildOpenAIMessages(systemPrompt, messages, provider, normalizedModel),
-    stream: provider !== "gemini"};
+    stream: provider !== "gemini"
+  };
+  if (["openrouter", "openai", "groq", "huggingface", "venice"].includes(provider)) {
+    return { ...base, tools: [], tool_choice: "none" };
+  }
+  return base;
 }
 
 const STREAM_HEADERS = {
@@ -79,7 +95,7 @@ Deno.serve(async (req: Request) => {
   let payload: any;
   try { payload = await req.json(); } catch { return json({ ok: false, error: "Неверный JSON" }, 400); }
 
-  const initData = payload.init_data || "";
+const initData = payload.init_data || "";
   const user = extractUser(initData);
   let userId: number | null = null;
   if (BOT_TOKEN && initData && user) {
@@ -91,6 +107,74 @@ Deno.serve(async (req: Request) => {
     userId = Number(payload.user_id);
   }
   if (userId == null) return json({ ok: false, error: "Не удалось определить пользователя" }, 401);
+
+  if (payload.compress) {
+    const supabase = getSupabase(true);
+    const userRow = await getUser(supabase, userId);
+    if (!userRow) return json({ ok: false, error: "Пользователь не найден" }, 404);
+    
+    // Get full history
+    const { data: hist } = await supabase
+      .from("messages")
+      .select("role, content, image_url")
+      .eq("user_id", userId)
+      .order("id", { ascending: true });
+    
+    const decrypted = await Promise.all((hist || []).map(async (m: any) => ({
+      ...m,
+      content: await decryptField(m.content || ""),
+    })));
+    
+    const history = historyToMessages(decrypted);
+    if (history.length < 5) {
+      return json({ ok: true, summary: "История слишком коротка для сжатия" });
+    }
+    
+    // Split: keep last 4 messages, summarize the rest
+    const toSummarize = history.slice(0, -4);
+    const recent = history.slice(-4);
+    
+    const summaryPrompt = "Сделай краткое резюме диалога: ключевые факты, договорённости, технические детали, имена. Максимум 300 слов.";
+    const summaryHistory = [
+      ...toSummarize,
+      { role: "user", content: summaryPrompt }
+    ];
+    
+    const model = userRow.selected_model;
+    const prov = detectProvider(model);
+    const normModel = normalizeModelId(prov, model);
+    const useCheap = (await getSupabase(true)).from("users").select("settings").eq("id", userId).single().then(r => r.data?.settings?.compress_use_cheap);
+    // For now use active model, can be extended with cheap model setting
+    const providerKey = await resolveEffectiveApiKey(supabase, userRow, prov);
+    
+    const summaryBody = buildPayload(prov, normModel, summaryPrompt, summaryHistory);
+    const summaryUrl = getProviderUrl(prov, normModel);
+    const summaryHeaders = toHeaders(prov, providerKey);
+    
+    const summaryResp = await fetch(summaryUrl, { method: "POST", headers: summaryHeaders, body: JSON.stringify(summaryBody) });
+    if (!summaryResp.ok) {
+      const err = await summaryResp.text();
+      return json({ ok: false, error: "Ошибка генерации резюме: " + err }, 500);
+    }
+    const summaryData = await summaryResp.json();
+    const summaryText = extractGeminiContent(summaryData) || extractOpenAIContent(summaryData) || "Ошибка извлечения";
+    
+    // Save compressed history: system prompt + summary + recent messages
+    const newHistory = [
+      { role: "user", content: userRow.system_prompt || "" },
+      { role: "assistant", content: "Резюме предыдущего диалога:\n" + summaryText },
+      ...recent
+    ];
+    
+    // Clear and save new compressed history
+    await supabase.from("messages").delete().eq("user_id", userId);
+    for (const msg of newHistory) {
+      const enc = await encryptField(msg.content || "");
+      await supabase.from("messages").insert({ user_id: userId, role: msg.role, content: enc });
+    }
+    
+    return json({ ok: true, summary: "Контекст сжат, старые сообщения заменены резюме" });
+  }
 
   const messageText = (payload.message || "").trim();
   const imageRaw = payload.image || null;
@@ -108,8 +192,8 @@ Deno.serve(async (req: Request) => {
     return json({ ok: false, error: "Слишком много запросов. Подождите минуту." }, 429);
   }
 
-  if (!(await isWhitelisted(supabase, userId))) {
-    await auditLog(supabase, userId, "chat_whitelist_fail", false);
+  if (await isBlacklisted(supabase, userId)) {
+    await auditLog(supabase, userId, "chat_blacklist_fail", false);
     return json({ ok: false, error: "Нет доступа. Запросите доступ у администратора." }, 401);
   }
   const userRow = await getUser(supabase, userId);
@@ -163,19 +247,47 @@ Deno.serve(async (req: Request) => {
     history = historyToMessages(decrypted);
   }
 
-  history.unshift(currentMsg);
+  history.push(currentMsg);
 
-  const model = userRow.selected_model;
+const model = userRow.selected_model;
   const provider = detectProvider(model);
   const normalizedModel = normalizeModelId(provider, model);
   const providerKey = await resolveEffectiveApiKey(supabase, userRow, provider);
-  if (!providerKey) return json({ ok: false, error: `Не указан API-ключ для ${provider}` }, 400);
+  if (!providerKey || !String(providerKey).trim()) {
+    await auditLog(supabase, userId, "chat_no_key", false);
+    return json({ ok: false, error: `Не указан API-ключ для ${PROVIDER_LABELS[provider] || provider}` }, 400);
+  }
 
   const url = getProviderUrl(provider, normalizedModel);
-  const headers = getProviderHeaders(provider, providerKey);
+  const headers = toHeaders(provider, providerKey);
   const serverHistory = history.length > 0 ? history : [];
-  const body = buildPayload(provider, normalizedModel, (payload.system_prompt || userRow.system_prompt || "").trim(), serverHistory);
+  const systemPrompt = (payload.system_prompt || userRow.system_prompt || "").trim();
+  let body = buildPayload(provider, normalizedModel, systemPrompt, serverHistory);
+  let cacheName: string | null = null;
+
+  // Gemini Prompt Caching
+  if (provider === "gemini") {
+    const { cacheName: cn, cachedHistory } = await getOrCreateGeminiCache(
+      supabase,
+      userId,
+      normalizedModel,
+      systemPrompt,
+      serverHistory,
+      providerKey
+    );
+    cacheName = cn;
+    if (cacheName) {
+      // Use cached content: only send recent history
+      body = buildPayload(provider, normalizedModel, systemPrompt, cachedHistory);
+      // Override URL to use cached content
+      const cacheUrl = `${API_ENDPOINTS.gemini_chat.replace("{model}", normalizedModel)}?key=${providerKey}&cachedContent=${encodeURIComponent(cacheName)}`;
+      body.cachedContent = cacheName;
+    }
+  }
+
   const statsMode = (userRow.stats_display || "full").toLowerCase();
+
+  console.log("[chat] provider=" + provider + " model=" + normalizedModel + " key_present=" + !!providerKey + " url=" + url + " cache=" + (cacheName || "none"));
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
@@ -187,8 +299,13 @@ Deno.serve(async (req: Request) => {
       let full = "";
       let usage: any = {};
 
-      try {
-        const resp = await fetch(url, { method: "POST", headers, body: JSON.stringify(body) });
+try {
+        const bodyStr = JSON.stringify(body);
+        console.log("[chat] fetch body=" + bodyStr.slice(0, 200));
+        const fetchUrl = cacheName 
+          ? `${API_ENDPOINTS.gemini_chat.replace("{model}", normalizedModel)}?key=${providerKey}&cachedContent=${encodeURIComponent(cacheName)}`
+          : url;
+        const resp = await fetch(fetchUrl, { method: "POST", headers, body: bodyStr });
         if (!resp.ok) {
           const text = await resp.text();
           send({ type: "error", message: `Ошибка API ${provider.toUpperCase()} (${resp.status}): ${text.slice(0, 500)}` });
@@ -275,9 +392,11 @@ Deno.serve(async (req: Request) => {
         send({ type: "error", message: `Ошибка сохранения: ${e?.message || e}` });
       }
 
-      const pt = usage.prompt_tokens ?? usage.promptTokenCount;
+const pt = usage.prompt_tokens ?? usage.promptTokenCount;
       const ct = usage.completion_tokens ?? usage.candidatesTokenCount;
       const tt = usage.total_tokens ?? usage.totalTokenCount;
+      const thinking = usage.thinking_tokens ?? usage.thoughtsTokenCount;
+      const cached = usage.cached_tokens ?? usage.cachedContentTokenCount;
       let statsStr = "";
       if (statsMode !== "disabled" && (pt != null || ct != null || tt != null)) {
         if (statsMode === "compact") {
@@ -285,7 +404,9 @@ Deno.serve(async (req: Request) => {
         } else {
           const parts: string[] = [`модель: ${model}`];
           if (pt != null) parts.push(`prompt: ${pt}`);
+          if (thinking != null && thinking > 0) parts.push(`thinking: ${thinking}`);
           if (ct != null) parts.push(`completion: ${ct}`);
+          if (cached != null && cached > 0) parts.push(`cached: ${cached}`);
           if (tt != null) parts.push(`total: ${tt}`);
           statsStr = parts.join(" | ");
         }
@@ -299,3 +420,7 @@ Deno.serve(async (req: Request) => {
    const errSupabase = getSupabase(true);return json({ ok: false, crash: String(e?.message || e), stack: String(e?.stack || "").substring(0, 800) }, 500);
  }
 });
+
+
+
+

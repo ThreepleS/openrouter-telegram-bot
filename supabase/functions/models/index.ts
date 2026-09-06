@@ -1,5 +1,5 @@
 ﻿// Edge Function: список моделей провайдера (аналог api_models).
-import { verifyInitData, extractUser, getEnv, getSupabase, API_ENDPOINTS, isWhitelisted, ensureUser, getUser, buildUserProviderKeys, getProviderApiKey, resolveEffectiveApiKey, normalizeProviderModel, isOpenrouterFreeModel, providerLabel, auditLog, checkRateLimit, corsPreflight, withCORS } from "../_shared/shared.ts";
+import { verifyInitData, extractUser, getEnv, getSupabase, API_ENDPOINTS, isBlacklisted, ensureUser, getUser, buildUserProviderKeys, getProviderApiKey, resolveEffectiveApiKey, normalizeProviderModel, isOpenrouterFreeModel, providerLabel, auditLog, checkRateLimit, corsPreflight, withCORS } from "../_shared/shared.ts";
 
 const BOT_TOKEN = getEnv("BOT_TOKEN");
 
@@ -81,11 +81,12 @@ async function fetchProviderModels(provider: string, key: string, showFreeOnly: 
     return [normalized, null];
   } else return [[], "Неизвестный провайдер"];
 
-  try {
+try {
     const r = await fetch(url, { headers });
     if (!r.ok) return [[], `Ошибка API ${providerLabel(provider)} (${r.status})`];
     const data = await r.json();
     const raw = data.data || [];
+    console.log("[models] openrouter: raw count:", raw.length);
     const normalized: any[] = [];
     for (const m of raw) {
       const model = normalizeProviderModel(provider, m);
@@ -121,7 +122,7 @@ Deno.serve(async (req: Request) => {
     await auditLog(supabase, userId, "models_rate_limited", false);
     return json({ ok: false, error: "Слишком много запросов. Подождите минуту." }, 429);
   }
-  if (!(await isWhitelisted(supabase, userId))) {return json({ ok: false, error: "Нет доступа" }, 401);
+  if (await isBlacklisted(supabase, userId)) {return json({ ok: false, error: "Нет доступа" }, 401);
   }
   await ensureUser(supabase, userId);
   const userRow = await getUser(supabase, userId);
@@ -135,9 +136,10 @@ Deno.serve(async (req: Request) => {
   const key = await resolveEffectiveApiKey(supabase, userRow, provider === "paid" ? "openrouter" : provider);
   if (!key) return json({ ok: false, error: `Укажи API-ключ ${providerLabel(provider)} в настройках` }, 400);
 
-  if (provider === "paid") {
+if (provider === "paid") {
     const [models, err] = await fetchProviderModels("openrouter", key, false);
     if (err) return json({ ok: false, error: err }, 502);
+    console.log("[models] paid: fetched", models.length, "models, free:", models.filter(m => m.is_free).length, "paid:", models.filter(m => !m.is_free).length);
     const paid = models.filter((m) => !m.is_free);
     await auditLog(supabase, userId, "models_paid", true);
     return json({ ok: true, provider: "paid", category: "paid", models: paid });
@@ -150,3 +152,7 @@ Deno.serve(async (req: Request) => {
   await auditLog(supabase, userId, "models_list", true);
   return json({ ok: true, provider, category, models });
 });
+
+
+
+
