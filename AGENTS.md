@@ -27,6 +27,12 @@
    - **CRITICAL RULE (Post-Deploy Version Reporting)**: After EVERY frontend deploy, the agent MUST explicitly state the new version string (e.g. `vYYYYMMDD_HHMM`) to the user in the chat, so the user can immediately compare and verify it in the app's settings ("Настройки -> Ещё").
 5. **Fixed Syntax Traps**:
    - `aiHubQueryAll(...).forEach(...) is not a function`: Caused when `aiHubQueryAll(...).forEach((tab) => { tab.addEventListener(...); });` had an unclosed callback (`forEach` wasn't closed with a second `});`), trapping subsequent code until a dangling `})();` at the end of the file invoked the `undefined` return value of `forEach(...)`.
+6. **NO EMOJIS — USE ONLY ICONS (Lucide) & CUSTOM UI**:
+   - **CRITICAL**: NEVER use emojis in the UI (no 🧠, ⚠️, ⚙️, 🔄, ▼, etc.).
+   - Exclusively use the project icon library: Lucide Icons (`<i data-lucide="..."></i>` or Lucide SVG icons).
+   - Ensure newly added dynamic DOM nodes trigger `if (window.lucide) lucide.createIcons(...)`.
+   - Never rely on default/native browser controls (like unstyled details/summary markers or native dialogs) — always build custom styled UI components.
+
 
 ## 3. Backend Conventions & Critical Rules (`supabase/functions/`)
 1. **Edge Functions**:
