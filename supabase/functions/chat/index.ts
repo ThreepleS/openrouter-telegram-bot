@@ -365,6 +365,8 @@ Deno.serve(async (req: Request) => {
 
       send({ type: "start" });
       let full = "";
+      let fullThinking = "";
+      let fullContent = "";
       let usage: any = {};
 
       try {
@@ -414,7 +416,7 @@ Deno.serve(async (req: Request) => {
                    prevText = prevText + delta;
                  }
                  if (delta) {
-                   full += delta;
+                   fullContent += delta;
                    send({ type: "delta", text: delta });
                  }
                } catch { /* частичный/служебный чанк */ }
@@ -446,10 +448,15 @@ Deno.serve(async (req: Request) => {
                 if (choices.length) {
                   const c0 = choices[0] || {};
                   const d = c0.delta || {};
-                  const delta = d.content || d.reasoning || d.reasoning_content || "";
-                  if (delta) {
-                    full += delta;
-                    send({ type: "delta", text: delta });
+                  const rDelta = d.reasoning || d.reasoning_content || "";
+                  const cDelta = d.content || "";
+                  if (rDelta) {
+                    fullThinking += rDelta;
+                    send({ type: "thinking", text: rDelta });
+                  }
+                  if (cDelta) {
+                    fullContent += cDelta;
+                    send({ type: "delta", text: cDelta });
                   }
                 }
                 if (obj.usage) usage = obj.usage;
@@ -461,6 +468,10 @@ Deno.serve(async (req: Request) => {
         send({ type: "error", message: `Не удалось подключиться к API: ${e?.message || e}` });
         return finish();
       }
+
+      full = fullThinking
+        ? (fullContent ? `<think>\n${fullThinking.trim()}\n</think>\n\n${fullContent}` : fullThinking)
+        : fullContent;
 
       if (!full.trim()) {
         send({
