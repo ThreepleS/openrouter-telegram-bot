@@ -1,4 +1,4 @@
-﻿// РћР±С‰РёР№ РєРѕРґ РґР»СЏ РІСЃРµС… Edge Functions: РїСЂРѕРІРµСЂРєР° initData Telegram, РґРѕСЃС‚СѓРї Рє Р‘Р”,
+// РћР±С‰РёР№ РєРѕРґ РґР»СЏ РІСЃРµС… Edge Functions: РїСЂРѕРІРµСЂРєР° initData Telegram, РґРѕСЃС‚СѓРї Рє Р‘Р”,
 // СѓС‚РёР»РёС‚С‹ РїСЂРѕРІР°Р№РґРµСЂРѕРІ. РџРѕРІС‚РѕСЂСЏРµС‚ Р»РѕРіРёРєСѓ src/web/auth.py Рё src/ai/providers.py.
 
 import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -217,10 +217,11 @@ function buildUserProviderKeys(user: any): Record<string, string> {
 }
 
 function detectProvider(modelId: string): string {
-  const lower = modelId.toLowerCase();
+  const lower = (modelId || "").toLowerCase();
   if (lower.startsWith("openai:")) return "openai";
+  // Только явный префикс gemini: или models/gemini- означают прямой Google API.
+  // ID вида google/gemini-... идут через OpenRouter (возвращаем openrouter).
   if (lower.startsWith("gemini:") || lower.startsWith("models/gemini-")) return "gemini";
-  if (lower.startsWith("google/gemini-") || lower.startsWith("gemini-")) return "gemini";
   if (lower.startsWith("groq:")) return "groq";
   if (lower.startsWith("hf:")) return "huggingface";
   if (lower.startsWith("venice:")) return "venice";
@@ -237,13 +238,9 @@ function normalizeModelId(provider: string, modelId: string): string {
     venice: "venice:",
   };
   const prefix = prefixes[provider];
-  let id = modelId;
+  let id = modelId || "";
   if (prefix && id.toLowerCase().startsWith(prefix)) id = id.slice(prefix.length);
-  if (provider === "gemini") {
-    if (id.toLowerCase().startsWith("google/gemini-")) id = id.slice(14);
-    if (id.toLowerCase().startsWith("gemini-")) id = id.slice(7);
-    if (id.toLowerCase().startsWith("models/")) id = id.slice(7);
-  }
+  if (provider === "gemini" && id.toLowerCase().startsWith("models/")) id = id.slice(7);
   return id;
 }
 

@@ -2,7 +2,7 @@
 // Настоящий server-side streaming: ReadableStream отдаёт ndjson-события
 // (start/delta/result) по мере поступления токенов от провайдера.
 
-import { verifyInitData, extractUser, getEnv, getSupabase, API_ENDPOINTS, isBlacklisted, ensureUser, getUser, buildUserProviderKeys, detectProvider, normalizeModelId, getProviderApiKey, resolveEffectiveApiKey, buildOpenAIMessages, buildGeminiContents, extractOpenAIContent, extractGeminiContent, extractUsage, auditLog, checkRateLimit, encryptField, decryptField, corsPreflight, withCORS, getOrCreateGeminiCache } from "../_shared/shared.ts";
+import { verifyInitData, extractUser, getEnv, getSupabase, API_ENDPOINTS, isBlacklisted, ensureUser, getUser, buildUserProviderKeys, detectProvider, normalizeModelId, getProviderApiKey, resolveEffectiveApiKey, buildOpenAIMessages, buildGeminiContents, extractOpenAIContent, extractGeminiContent, extractUsage, auditLog, checkRateLimit, encryptField, decryptField, corsPreflight, withCORS, getOrCreateGeminiCache, providerLabel } from "../_shared/shared.ts";
 
 const BOT_TOKEN = getEnv("BOT_TOKEN");
 
@@ -95,9 +95,6 @@ Deno.serve(async (req: Request) => {
   let payload: any;
   try { payload = await req.json(); } catch { return json({ ok: false, error: "Неверный JSON" }, 400); }
 
-const initData = payload.init_data || "";
-  const user = extractUser(initData);
-  let userId: number | null = null;
   const initData = payload.init_data || "";
   const user = extractUser(initData);
   let userId: number | null = null;
@@ -328,6 +325,10 @@ const initData = payload.init_data || "";
   const provider = detectProvider(model);
   const normalizedModel = normalizeModelId(provider, model);
   const providerKey = await resolveEffectiveApiKey(supabase, userRow, provider);
+  if (!providerKey || !String(providerKey).trim()) {
+    await auditLog(supabase, userId, "chat_no_key", false);
+    return json({ ok: false, error: `Не указан API-ключ для ${providerLabel(provider)}` }, 400);
+  }
   
   const url = getProviderUrl(provider, normalizedModel);
   const headers = toHeaders(provider, providerKey);
