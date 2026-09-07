@@ -375,7 +375,53 @@ Deno.serve(async (req: Request) => {
         const resp = await fetch(url, { method: "POST", headers, body: bodyStr });
         if (!resp.ok) {
           const text = await resp.text();
-          send({ type: "error", message: `Ошибка API ${provider.toUpperCase()} (${resp.status}): ${text.slice(0, 500)}` });
+          let friendly = "";
+          let errorTitle = "";
+          let formattedRaw = text;
+
+          try {
+            const errObj = JSON.parse(text);
+            formattedRaw = JSON.stringify(errObj, null, 2);
+            const err = errObj.error || errObj;
+            const msg = String(err.message || "");
+            const rawMeta = String(err.metadata?.raw || "");
+
+            if (resp.status === 429 || /rate[-_]?limit/i.test(msg) || /rate[-_]?limit/i.test(rawMeta) || /shared_pool/i.test(rawMeta)) {
+              errorTitle = "Модель перегружена (Лимит запросов)";
+              friendly = "Эта модель сейчас временно перегружена запросами или исчерпан лимит бесплатного пула. Попробуйте повторить запрос через 1-2 минуты или выберите другую модель.";
+            } else if (resp.status === 402 || /insufficient|balance|credit/i.test(msg) || /insufficient|balance|credit/i.test(rawMeta)) {
+              errorTitle = "Недостаточно средств / квоты";
+              friendly = "У провайдера исчерпан баланс или лимит токенов. Попробуйте выбрать бесплатную модель или добавить свой ключ в настройках.";
+            } else if (resp.status === 401 || resp.status === 403 || /api[-_]?key|auth|unauthorized/i.test(msg)) {
+              errorTitle = "Ошибка авторизации";
+              friendly = "Недействительный или отсутствующий API-ключ для этой модели. Проверьте настройки или выберите модель из другой вкладки.";
+            } else if (resp.status === 503 || resp.status === 502 || resp.status === 504) {
+              errorTitle = "Провайдер временно недоступен";
+              friendly = "Сервис провайдера временно недоступен или не отвечает. Попробуйте повторить запрос чуть позже или переключиться на другую модель.";
+            } else if (resp.status === 404) {
+              errorTitle = "Модель не найдена";
+              friendly = "Данная модель сейчас отключена или удалена провайдером. Пожалуйста, выберите другую модель из каталога.";
+            }
+          } catch (_) {}
+
+          if (!friendly) {
+            if (resp.status === 429) {
+              errorTitle = "Модель перегружена (429)";
+              friendly = "Эта модель сейчас временно перегружена запросами. Пожалуйста, подождите минуту или выберите другую модель.";
+            } else {
+              errorTitle = `Ошибка ${provider.toUpperCase()} (${resp.status})`;
+              friendly = `Провайдер ${provider.toUpperCase()} вернул ошибку при обработке запроса. Вы можете повторить попытку или выбрать другую модель.`;
+            }
+          }
+
+          send({
+            type: "error",
+            title: errorTitle,
+            message: friendly,
+            raw: `HTTP ${resp.status} ${resp.statusText || ""}\n${formattedRaw}`.trim(),
+            status: resp.status,
+            provider
+          });
           return finish();
         }
 
@@ -399,7 +445,12 @@ Deno.serve(async (req: Request) => {
                  const obj = JSON.parse(data);
                  if (obj.error) {
                    const errMsg = obj.error.message || JSON.stringify(obj.error);
-                   send({ type: "error", message: `Ошибка Gemini: ${errMsg}` });
+                   send({
+                     type: "error",
+                     title: "Ошибка Gemini",
+                     message: "Gemini вернул ошибку при генерации ответа. Попробуйте повторить запрос или сменить модель.",
+                     raw: `Ошибка Gemini:\n${typeof obj.error === "object" ? JSON.stringify(obj.error, null, 2) : errMsg}`
+                   });
                    return finish();
                  }
                  const textNow = extractGeminiContent(obj);
@@ -441,7 +492,12 @@ Deno.serve(async (req: Request) => {
                 const obj = JSON.parse(data);
                 if (obj.error) {
                   const errMsg = obj.error.message || JSON.stringify(obj.error);
-                  send({ type: "error", message: `Ошибка ${provider.toUpperCase()}: ${errMsg}` });
+                  send({
+                    type: "error",
+                    title: "Ошибка при генерации",
+                    message: "Модель вернула ошибку во время генерации ответа. Попробуйте повторить запрос или сменить модель.",
+                    raw: `Ошибка ${provider.toUpperCase()}:\n${typeof obj.error === "object" ? JSON.stringify(obj.error, null, 2) : errMsg}`
+                  });
                   return finish();
                 }
                 const choices = obj.choices || [];
