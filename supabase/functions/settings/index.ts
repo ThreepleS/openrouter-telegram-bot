@@ -1,4 +1,4 @@
-﻿// Edge Function: settings (сохранение ключей/модели/промпта). Аналог api_settings.
+// Edge Function: settings (сохранение ключей/модели/промпта). Аналог api_settings.
 import { verifyInitData, extractUser, getEnv, getSupabase, isBlacklisted, ensureUser, getUser, PROVIDER_KEY_COLS, auditLog, checkRateLimit, encryptField, decryptField, encryptApiKey, decryptApiKey, corsPreflight, withCORS } from "../_shared/shared.ts";
 
 const BOT_TOKEN = getEnv("BOT_TOKEN");
@@ -65,7 +65,7 @@ Deno.serve(async (req: Request) => {
   if (payload.context_limit !== undefined) {
     let cl = Number(payload.context_limit);
     if (isNaN(cl)) return json({ ok: false, error: "Лимит контекста должен быть числом" }, 400);
-    cl = Math.max(1, Math.min(100, cl));
+    cl = Math.max(1, Math.min(1000000, cl));
     updates.context_limit = cl;
   }
   if (payload.stats_display !== undefined) {
