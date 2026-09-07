@@ -70,15 +70,11 @@ function buildPayload(provider: string, normalizedModel: string, systemPrompt: s
       contents: buildGeminiContents(messages, provider, normalizedModel),
       system_instruction: { parts: [{ text: systemPrompt }] }};
   }
-  const base = {
+  return {
     model: normalizedModel,
     messages: buildOpenAIMessages(systemPrompt, messages, provider, normalizedModel),
     stream: provider !== "gemini"
   };
-  if (["openrouter", "openai", "groq", "huggingface", "venice"].includes(provider)) {
-    return { ...base, tools: [], tool_choice: "none" };
-  }
-  return base;
 }
 
 const STREAM_HEADERS = {
@@ -399,6 +395,11 @@ Deno.serve(async (req: Request) => {
               if (!data || data === "[DONE]") continue;
                try {
                  const obj = JSON.parse(data);
+                 if (obj.error) {
+                   const errMsg = obj.error.message || JSON.stringify(obj.error);
+                   send({ type: "error", message: `Ошибка Gemini: ${errMsg}` });
+                   return finish();
+                 }
                  const textNow = extractGeminiContent(obj);
                  if (obj.usageMetadata) usage = extractUsage(obj, "gemini");
                  let delta = "";
@@ -434,21 +435,38 @@ Deno.serve(async (req: Request) => {
               if (!line || !line.startsWith("data:")) continue;
               const data = line.slice(5).trim();
               if (data === "[DONE]") break;
-               try {
-                 const obj = JSON.parse(data);
-                 const choices = obj.choices || [];
-                 let delta = choices.length ? (choices[0].delta?.content || "") : "";
-                 if (obj.usage) usage = obj.usage;
+              try {
+                const obj = JSON.parse(data);
+                if (obj.error) {
+                  const errMsg = obj.error.message || JSON.stringify(obj.error);
+                  send({ type: "error", message: `Ошибка ${provider.toUpperCase()}: ${errMsg}` });
+                  return finish();
+                }
+                const choices = obj.choices || [];
+                if (choices.length) {
+                  const c0 = choices[0] || {};
+                  const d = c0.delta || {};
+                  const delta = d.content || d.reasoning || d.reasoning_content || "";
                   if (delta) {
                     full += delta;
                     send({ type: "delta", text: delta });
                   }
-               } catch { /* ignore partial */ }
+                }
+                if (obj.usage) usage = obj.usage;
+              } catch { /* ignore partial */ }
             }
           }
         }
       } catch (e: any) {
         send({ type: "error", message: `Не удалось подключиться к API: ${e?.message || e}` });
+        return finish();
+      }
+
+      if (!full.trim()) {
+        send({
+          type: "error",
+          message: "Модель вернула пустой ответ. Возможно, на стороне провайдера высокая нагрузка или лимиты. Попробуйте повторить запрос или выбрать другую модель."
+        });
         return finish();
       }
 
