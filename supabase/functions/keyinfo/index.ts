@@ -1,4 +1,4 @@
-﻿// Edge Function: статус ключей провайдеров (аналог api_keyinfo).
+// Edge Function: статус ключей провайдеров (аналог api_keyinfo).
 import { verifyInitData, extractUser, getEnv, getSupabase, isBlacklisted, ensureUser, getUser, auditLog, checkRateLimit, corsPreflight, withCORS, resolveEffectiveApiKey } from "../_shared/shared.ts";
 
 const BOT_TOKEN = getEnv("BOT_TOKEN");
@@ -26,8 +26,6 @@ Deno.serve(async (req: Request) => {
   if (BOT_TOKEN && initData && user) {
     if (!(await verifyInitData(initData, BOT_TOKEN))) return json({ ok: false, error: "Невалидные данные Telegram" }, 401);
     userId = user.id;
-  } else if (getEnv("WEB_APP_DEV") && payload.user_id) {
-    userId = Number(payload.user_id);
   }
   if (userId == null) return json({ ok: false, error: "Не удалось определить пользователя" }, 401);
   const supabase = getSupabase(true);

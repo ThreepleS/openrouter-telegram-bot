@@ -99,8 +99,6 @@ Deno.serve(async (req: Request) => {
     await auditLog(getSupabase(true), user.id, "chat_verify", ok);
     if (!ok) return json({ ok: false, error: "Невалидные данные Telegram" }, 401);
     userId = user.id;
-  } else if (getEnv("WEB_APP_DEV") && payload.user_id) {
-    userId = Number(payload.user_id);
   }
   if (userId == null) return json({ ok: false, error: "Не удалось определить пользователя" }, 401);
 
@@ -283,8 +281,13 @@ Deno.serve(async (req: Request) => {
     return json({ ok: false, error: "Выбери модель в настройках" }, 401);
   }
 
+  if (imageRaw && typeof imageRaw === "string" && imageRaw.length > 5 * 1024 * 1024) {
+    return json({ ok: false, error: "Изображение слишком велико (макс. 4 МБ)" }, 400);
+  }
+
   const encryptedMessage = await encryptField(messageText);
-  await supabase.from("messages").insert({ user_id: userId, role: "user", content: encryptedMessage, image_url: imageRaw });
+  const encryptedImage = imageRaw ? await encryptField(imageRaw) : null;
+  await supabase.from("messages").insert({ user_id: userId, role: "user", content: encryptedMessage, image_url: encryptedImage });
 
   const currentMsg: any = { role: "user", content: messageText };
   if (imageRaw && typeof imageRaw === "string" && imageRaw.startsWith("data:")) {
@@ -311,6 +314,7 @@ Deno.serve(async (req: Request) => {
     const decrypted = await Promise.all((hist || []).reverse().map(async (m: any) => ({
       ...m,
       content: await decryptField(m.content || ""),
+      image_url: m.image_url ? await decryptField(m.image_url) : null,
     })));
     history = historyToMessages(decrypted);
   }
@@ -546,11 +550,20 @@ Deno.serve(async (req: Request) => {
         send({ type: "error", message: `Ошибка сохранения: ${e?.message || e}` });
       }
 
-const pt = usage.prompt_tokens ?? usage.promptTokenCount;
+      const pt = usage.prompt_tokens ?? usage.promptTokenCount;
       const ct = usage.completion_tokens ?? usage.candidatesTokenCount;
       const tt = usage.total_tokens ?? usage.totalTokenCount;
       const thinking = usage.thinking_tokens ?? usage.thoughtsTokenCount;
       const cached = usage.cached_tokens ?? usage.cachedContentTokenCount;
+      const usageNormalized = {
+        prompt_tokens: pt ?? null,
+        completion_tokens: ct ?? null,
+        total_tokens: tt ?? (pt != null || ct != null ? ((pt || 0) + (ct || 0)) : null),
+        thinking_tokens: thinking ?? null,
+        cached_tokens: cached ?? null,
+        model: model,
+        ...usage
+      };
       let statsStr = "";
       if (statsMode !== "disabled" && (pt != null || ct != null || tt != null)) {
         if (statsMode === "compact") {
@@ -565,16 +578,14 @@ const pt = usage.prompt_tokens ?? usage.promptTokenCount;
           statsStr = parts.join(" | ");
         }
       }
-      send({ type: "result", ok: true, reply: full, markdown: full, model, usage, stats: statsStr });
+      send({ type: "result", ok: true, reply: full, markdown: full, model, usage: usageNormalized, stats: statsStr });
       finish();
     }});
 
-  const chatSupabase = getSupabase(true);return withCORS(new Response(stream, { headers: STREAM_HEADERS }));
+  const chatSupabase = getSupabase(true);
+  return withCORS(new Response(stream, { headers: STREAM_HEADERS }));
  } catch (e: any) {
-   const errSupabase = getSupabase(true);return json({ ok: false, crash: String(e?.message || e), stack: String(e?.stack || "").substring(0, 800) }, 500);
+    console.error("[chat server error]", e);
+    return json({ ok: false, error: "Внутренняя ошибка сервера" }, 500);
  }
 });
-
-
-
-

@@ -1,4 +1,4 @@
-﻿// Edge Function: список моделей провайдера (аналог api_models).
+// Edge Function: список моделей провайдера (аналог api_models).
 import { verifyInitData, extractUser, getEnv, getSupabase, API_ENDPOINTS, isBlacklisted, ensureUser, getUser, buildUserProviderKeys, getProviderApiKey, resolveEffectiveApiKey, normalizeProviderModel, isOpenrouterFreeModel, providerLabel, auditLog, checkRateLimit, corsPreflight, withCORS } from "../_shared/shared.ts";
 
 const BOT_TOKEN = getEnv("BOT_TOKEN");
@@ -114,10 +114,9 @@ Deno.serve(async (req: Request) => {
   if (BOT_TOKEN && initData && user) {
     if (!(await verifyInitData(initData, BOT_TOKEN))) return json({ ok: false, error: "Невалидные данные Telegram" }, 401);
     userId = user.id;
-  } else if (getEnv("WEB_APP_DEV") && payload.user_id) {
-    userId = Number(payload.user_id);
   }
-  if (userId == null) return json({ ok: false, error: "Не удалось определить пользователя" }, 401);const supabase = getSupabase(true);
+  if (userId == null) return json({ ok: false, error: "Не удалось определить пользователя" }, 401);
+  const supabase = getSupabase(true);
   if (!(await checkRateLimit(supabase, userId))) {
     await auditLog(supabase, userId, "models_rate_limited", false);
     return json({ ok: false, error: "Слишком много запросов. Подождите минуту." }, 429);

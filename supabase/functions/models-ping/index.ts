@@ -1,4 +1,4 @@
-﻿// Edge Function: пинг бесплатных моделей провайдера (аналог api_models_ping).
+// Edge Function: пинг бесплатных моделей провайдера (аналог api_models_ping).
 import { verifyInitData, extractUser, getEnv, getSupabase, API_ENDPOINTS, isBlacklisted, ensureUser, getUser, buildUserProviderKeys, getProviderApiKey, resolveEffectiveApiKey, detectProvider, normalizeModelId, normalizeProviderModel, modelIdForProvider, buildOpenAIMessages, auditLog, checkRateLimit, corsPreflight, withCORS } from "../_shared/shared.ts";
 
 const BOT_TOKEN = getEnv("BOT_TOKEN");
@@ -26,7 +26,7 @@ async function pingOne(provider: string, modelId: string, key: string, systemPro
     headers.Authorization = `Bearer ${key}`;
     headers["Content-Type"] = "application/json";
   } else {
-    return ["error", "ping РЅРµ РїРѕРґРґРµСЂР¶РёРІР°РµС‚СЃСЏ РґР»СЏ РїСЂРѕРІР°Р№РґРµСЂР°"];
+    return ["error", "ping не поддерживается для провайдера"];
   }
 
   const messages = [{ role: "user", content: "Ping" }];
@@ -49,9 +49,9 @@ async function pingOne(provider: string, modelId: string, key: string, systemPro
 Deno.serve(async (req: Request) => {
   const pre = corsPreflight(req);
   if (pre) return pre;
-  if (req.method !== "POST") return json({ ok: false, error: "РњРµС‚РѕРґ РЅРµ РїРѕРґРґРµСЂР¶РёРІР°РµС‚СЃСЏ" }, 405);
+  if (req.method !== "POST") return json({ ok: false, error: "Метод не поддерживается" }, 405);
   let payload: any;
-  try { payload = await req.json(); } catch { return json({ ok: false, error: "РќРµРІРµСЂРЅС‹Р№ JSON" }, 400); }
+  try { payload = await req.json(); } catch { return json({ ok: false, error: "Неверный JSON" }, 400); }
 
   const initData = payload.init_data || "";
   const user = extractUser(initData);
@@ -59,15 +59,15 @@ Deno.serve(async (req: Request) => {
   if (BOT_TOKEN && initData && user) {
     if (!(await verifyInitData(initData, BOT_TOKEN))) return json({ ok: false, error: "Невалидные данные Telegram" }, 401);
     userId = user.id;
-  } else if (getEnv("WEB_APP_DEV") && payload.user_id) {
-    userId = Number(payload.user_id);
   }
-  if (userId == null) return json({ ok: false, error: "Не удалось определить пользователя" }, 401);const supabase = getSupabase(true);
+  if (userId == null) return json({ ok: false, error: "Не удалось определить пользователя" }, 401);
+  const supabase = getSupabase(true);
   if (!(await checkRateLimit(supabase, userId))) {
     await auditLog(supabase, userId, "models_ping_rate_limited", false);
     return json({ ok: false, error: "Слишком много запросов. Подождите минуту." }, 429);
   }
-  if (await isBlacklisted(supabase, userId)) {return json({ ok: false, error: "Нет доступа" }, 401);
+  if (await isBlacklisted(supabase, userId)) {
+    return json({ ok: false, error: "Нет доступа" }, 401);
   }
   await ensureUser(supabase, userId);
   const userRow = await getUser(supabase, userId);
@@ -75,7 +75,6 @@ Deno.serve(async (req: Request) => {
   let provider = payload.provider || "openrouter";
   if (!["openrouter", "gemini", "venice"].includes(provider)) provider = "openrouter";
 
-  const dbKeys = buildUserProviderKeys(userRow);
   const key = await resolveEffectiveApiKey(supabase, userRow, provider);
   if (!key) return json({ ok: false, error: "Укажи API-ключ" }, 400);
 
@@ -106,17 +105,13 @@ Deno.serve(async (req: Request) => {
   const working = results.filter((r) => r.status === "ok").map((r) => r.model_id);
   const failed = results.filter((r) => r.status !== "ok").map((r) => r.model_id);
   await auditLog(supabase, userId, "models_ping", true, `${provider}:${working.length}/${results.length}`);
-  const resp = json({
+  return json({
     ok: true,
     provider,
     pinged_at: Math.floor(Date.now() / 1000),
     total: results.length,
     working: working.length,
     failed: failed.length,
-    results});return resp;
+    results,
+  });
 });
-
-
-
-
-

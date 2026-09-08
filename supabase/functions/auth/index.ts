@@ -1,4 +1,4 @@
-﻿// Edge Function: auth (аналог api_auth + api_whoami).
+// Edge Function: auth (аналог api_auth + api_whoami).
 import { verifyInitData, extractUser, getEnv, getSupabase, isBlacklisted, ensureUser, getUser, auditLog, checkRateLimit, decryptField, corsPreflight, withCORS, resolveEffectiveApiKey } from "../_shared/shared.ts";
 
 const BOT_TOKEN = getEnv("BOT_TOKEN");
@@ -23,8 +23,6 @@ Deno.serve(async (req: Request) => {
     await auditLog(getSupabase(true), user.id, "auth_verify", ok);
     if (!ok) return json({ ok: false, error: "Невалидные данные Telegram" }, 401);
     userId = user.id;
-  } else if (getEnv("WEB_APP_DEV") && payload.user_id) {
-    userId = Number(payload.user_id);
   }
   if (userId == null) return json({ ok: false, error: "Не удалось определить пользователя" }, 401);
 

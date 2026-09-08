@@ -80,10 +80,12 @@ async function verifyInitData(initData: string, botToken: string): Promise<boole
     .join("\n");
 
   const authDate = params.get("auth_date");
-  if (authDate) {
-    const ts = Number(authDate);
-    if (Number.isFinite(ts) && Date.now() / 1000 - ts > 86400) return false;
-  }
+  if (!authDate) return false;
+  const ts = Number(authDate);
+  const nowSec = Date.now() / 1000;
+  if (!Number.isFinite(ts)) return false;
+  if (nowSec - ts > 86400) return false; // Not older than 24 hours
+  if (ts > nowSec + 60) return false; // Not more than 60 seconds in the future
 
   const keyBuf = new TextEncoder().encode("WebAppData");
   const tokenBuf = new TextEncoder().encode(botToken);
@@ -548,12 +550,32 @@ async function checkRateLimit(supabase: SupabaseClient, userId: number): Promise
   return true;
 }
 
+function uint8ArrayToBase64(buf: Uint8Array): string {
+  let binary = "";
+  const len = buf.byteLength;
+  const chunkSize = 8192;
+  for (let i = 0; i < len; i += chunkSize) {
+    const chunk = buf.subarray(i, Math.min(i + chunkSize, len));
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
+function base64ToUint8Array(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
 let cachedCryptoKey: CryptoKey | null = null;
 let cachedRawKey = "";
 
 function getCryptoKey(): { key: CryptoKey | null; raw: string } {
   const raw = getEnv("AUDIT_ENCRYPTION_KEY");
-  if (!raw || raw.length < 32) return { key: null, raw: "" };
+  if (!raw || raw.length < 16) return { key: null, raw: "" };
   if (cachedCryptoKey && cachedRawKey === raw) return { key: cachedCryptoKey, raw };
   cachedRawKey = raw;
   return { key: null, raw: cachedRawKey };
@@ -568,54 +590,81 @@ async function importCryptoKey(raw: string): Promise<CryptoKey | null> {
         keyBytes[i] = parseInt(raw.slice(i * 2, i * 2 + 2), 16);
       }
     } else {
-      keyBytes = new TextEncoder().encode(raw);
+      // Derive exactly 256-bit key using SHA-256 for standard AES-256-GCM
+      const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(raw));
+      keyBytes = new Uint8Array(hash);
     }
     return await crypto.subtle.importKey("raw", keyBytes, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
-  } catch (_) {
+  } catch (e) {
+    console.error("[crypto] importCryptoKey failed:", e);
     return null;
   }
 }
 
 async function encryptField(plaintext: string): Promise<string> {
+  if (!plaintext) return "";
   const { raw } = getCryptoKey();
   if (!raw) return plaintext;
   try {
     const keyMaterial = await importCryptoKey(raw);
-    if (!keyMaterial) return plaintext;
+    if (!keyMaterial) {
+      throw new Error("Crypto key material unavailable");
+    }
     const iv = crypto.getRandomValues(new Uint8Array(12));
-    const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, keyMaterial, new TextEncoder().encode(plaintext));
+    const encrypted = await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv },
+      keyMaterial,
+      new TextEncoder().encode(plaintext),
+    );
     const buf = new Uint8Array(iv.byteLength + encrypted.byteLength);
     buf.set(iv);
     buf.set(new Uint8Array(encrypted), iv.byteLength);
-    return btoa(String.fromCharCode(...buf));
-  } catch (_) {
-    return plaintext;
+    return "enc:" + uint8ArrayToBase64(buf);
+  } catch (e) {
+    console.error("[crypto] Encryption failed:", e);
+    throw new Error("Failed to encrypt sensitive data: refusal to store in plaintext");
   }
 }
 
 async function decryptField(ciphertext: string): Promise<string> {
+  if (!ciphertext) return "";
   const { raw } = getCryptoKey();
   if (!raw) return ciphertext;
+
+  let rawCipher = ciphertext;
+  if (rawCipher.startsWith("enc:")) {
+    rawCipher = rawCipher.slice(4);
+  }
+
   try {
     const keyMaterial = await importCryptoKey(raw);
     if (!keyMaterial) return ciphertext;
-    const data = Uint8Array.from(atob(ciphertext), (c) => c.charCodeAt(0));
+    const data = base64ToUint8Array(rawCipher);
+    if (data.length < 13) return ciphertext;
     const iv = data.slice(0, 12);
     const payload = data.slice(12);
     const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, keyMaterial, payload);
     return new TextDecoder().decode(decrypted);
   } catch (_) {
+    // Backward-compatibility: if value was stored in plaintext, return as is
     return ciphertext;
   }
 }
 
 async function tryDecryptField(ciphertext: string): Promise<string | null> {
+  if (!ciphertext) return null;
   const { raw } = getCryptoKey();
   if (!raw) return null;
+
+  let rawCipher = ciphertext;
+  if (rawCipher.startsWith("enc:")) {
+    rawCipher = rawCipher.slice(4);
+  }
+
   try {
     const keyMaterial = await importCryptoKey(raw);
     if (!keyMaterial) return null;
-    const data = Uint8Array.from(atob(ciphertext), (c) => c.charCodeAt(0));
+    const data = base64ToUint8Array(rawCipher);
     if (data.length < 13) return null;
     const iv = data.slice(0, 12);
     const payload = data.slice(12);
